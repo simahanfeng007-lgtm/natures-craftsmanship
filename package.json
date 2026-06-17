@@ -1,0 +1,103 @@
+{
+  "name": "linyuanzhe-electron-web",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Electron + Web shell for Tiangong RuntimeHost.",
+  "main": "main.js",
+  "scripts": {
+    "ensure": "node scripts/ensure-electron-runtime.mjs",
+    "start": "npm run ensure && electron .",
+    "smoke": "node scripts/smoke.mjs",
+    "dist": "npm run ensure && electron-builder",
+    "dist:win": "npm run ensure && electron-builder --win nsis portable",
+    "dist:linux": "npm run ensure && electron-builder --linux AppImage deb tar.gz",
+    "dist:mac": "npm run ensure && electron-builder --mac dmg zip"
+  },
+  "build": {
+    "appId": "cn.tiangongzaowu.linyuanzhe",
+    "productName": "天工造物-临渊者",
+    "artifactName": "${productName}-Setup-${version}.${ext}",
+    "directories": {
+      "output": "../../installer/dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "package.json",
+      "src/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "../..",
+        "to": "backend",
+        "filter": [
+          "run_agent.py",
+          "knowledge_bridge.py",
+          "config/model_config.example.json",
+          "tiangong_agent_shell/**/*",
+          "tiangong_agent_runtime/**/*",
+          "tiangong_kernel/**/*",
+          "dataup/**/*",
+          "docs/**/*",
+          "!**/__pycache__/**",
+          "!**/*.pyc",
+          "!**/.pytest_cache/**",
+          "!**/.linyuanzhe/**",
+          "!**/.tiangong/**",
+          "!**/real_api_pressure_runs/**",
+          "!**/_codex_chain_tests/**",
+          "!config/model_config.json"
+        ]
+      },
+      {
+        "from": "../../installer/runtime/backend_runtime",
+        "to": "backend_runtime",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "../../installer/PACKAGING_PRODUCTIZATION_NOTICE.md",
+        "to": "PACKAGING_PRODUCTIZATION_NOTICE.md"
+      }
+    ],
+    "asar": true,
+    "win": {
+      "executableName": "天工造物-临渊者",
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb",
+        "tar.gz"
+      ],
+      "category": "Utility"
+    },
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.productivity"
+    },
+    "nsis": {
+      "guid": "cn.tiangongzaowu.linyuanzhe",
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false,
+      "deleteAppDataOnUninstall": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "天工造物-临渊者",
+      "uninstallDisplayName": "天工造物-临渊者"
+    }
+  },
+  "devDependencies": {
+    "electron": "^37.2.0",
+    "electron-builder": "^26.15.2"
+  }
+}

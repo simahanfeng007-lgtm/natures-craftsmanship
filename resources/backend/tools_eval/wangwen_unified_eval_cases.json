@@ -1,0 +1,34 @@
+{
+  "schema": "wangwen_unified_eval_cases.v1",
+  "cases": [
+    {
+      "tool_name": "wangwen_novel_factory_run",
+      "arguments": {
+        "genre": "都市爽文",
+        "premise": "外卖员觉醒供应链系统",
+        "chapter_goal": "第一章被羞辱后反击",
+        "word_count": 2200
+      }
+    },
+    {
+      "tool_name": "wangwen_chapter_brief_build",
+      "arguments": {
+        "genre": "玄幻仙侠",
+        "chapter_outline": "宗门大比前被嘲笑；主角上台；旧法器异动；章末长老变脸"
+      }
+    },
+    {
+      "tool_name": "wangwen_draft_quality_check",
+      "arguments": {
+        "text": "首先，他意识到命运的齿轮开始转动。空气仿佛凝固，众人哗然。"
+      }
+    },
+    {
+      "tool_name": "wangwen_revision_plan_build",
+      "arguments": {
+        "text": "首先，他意识到命运的齿轮开始转动。空气仿佛凝固，众人哗然。",
+        "strictness": "heavy"
+      }
+    }
+  ]
+}
