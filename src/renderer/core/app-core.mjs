@@ -2,6 +2,19 @@ import { createActions } from "./actions.mjs";
 import { createBus } from "./bus.mjs";
 import { createState } from "./state.mjs";
 
+const THEME_STYLES = new Set(["ink_teal", "bronze_gear", "jade_light"]);
+
+function normalizeThemeStyle(value) {
+  const theme = String(value || "").trim();
+  return THEME_STYLES.has(theme) ? theme : "ink_teal";
+}
+
+function applyTheme(documentRef, settings) {
+  const root = documentRef?.documentElement;
+  if (!root) return;
+  root.dataset.theme = normalizeThemeStyle(settings?.themeStyle);
+}
+
 export function createAppCore({ runtime, documentRef = document } = {}) {
   const state = createState();
   const bus = createBus();
@@ -18,6 +31,8 @@ export function createAppCore({ runtime, documentRef = document } = {}) {
   };
 
   core.actions = createActions({ runtime, state });
+  applyTheme(documentRef, state.snapshot().settings);
+  state.on("settings", (settings) => applyTheme(documentRef, settings));
 
   function registerPlugin(plugin) {
     if (!plugin?.id || !plugin?.slot || typeof plugin.mount !== "function") {

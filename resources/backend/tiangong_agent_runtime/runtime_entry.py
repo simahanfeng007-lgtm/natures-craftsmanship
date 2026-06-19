@@ -34,7 +34,7 @@ from .adapters.document_context_adapters import document_export_adapter, documen
 from .adapters.document_parse_adapter import document_parse_adapter
 from .adapters.document_writeback_adapters import document_apply_rewrite_adapter, document_rollback_adapter
 from .adapters.model_chat_adapter import model_chat_adapter
-from .adapters.network_tools_adapter import dns_resolve_adapter, http_client_adapter, network_request_adapter, protocol_adapter_adapter, web_readability_extract_adapter
+from .adapters.network_tools_adapter import dns_resolve_adapter, http_client_adapter, network_request_adapter, protocol_adapter_adapter, web_download_adapter, web_readability_extract_adapter
 from .adapters.project_scan_adapter import build_scan_project_adapter
 from .adapters.python_test_adapter import run_python_quality_check_adapter, run_python_tests_adapter
 from .adapters.quality_gate_adapter import build_evaluate_quality_gate_adapter
@@ -274,9 +274,9 @@ from .execution_exoskeleton import ExecutionExoskeletonBridge, build_execution_e
 from .execution_spine import ExecutionSpine
 from .experience_synthesis import ExperienceSynthesisBridge, build_synthesize_experience_adapter
 from .forgetting_review_router import ForgetReviewDecision  # ForgetReviewRouter已移除（L6.72执行链简化）
-from .free_will_learning_chain import JingyanChi, XuexiLian
 from .governance_execution import GovernanceExecutionBridge, build_governance_execution_adapter
 from .intent_bridge import IntentResult
+from .autonomous_learning_pipeline import AutonomousLearningPipeline, LearningCardStore
 from .learning_asset_activation import LearningAssetActivationBridge, build_learning_asset_activation_apply_adapter, build_learning_asset_activation_guide_adapter, build_learning_asset_activation_smoke_adapter, build_learning_asset_activation_status_adapter
 from .learning_asset_adapter import LearningAssetAdapterBridge, build_learning_asset_adapter_drill_adapter, build_learning_asset_adapter_guide_adapter, build_learning_asset_adapter_template_list_adapter, build_learning_asset_adapter_template_normalize_adapter, build_learning_asset_adapter_template_smoke_adapter, build_learning_asset_adapter_template_validate_adapter
 from .learning_asset_candidate_sandbox import LearningAssetCandidateSandboxBridge, build_learning_asset_candidate_sandbox_build_adapter, build_learning_asset_candidate_sandbox_guide_adapter, build_learning_asset_candidate_sandbox_review_adapter, build_learning_asset_candidate_sandbox_validate_adapter
@@ -286,7 +286,7 @@ from .learning_asset_sandbox_alignment import LearningAssetSandboxAlignmentBridg
 from .learning_convergence import LearningConvergenceBridge, build_learning_convergence_adapter
 from .lifecycle_coordinator import LifecycleCoordinator, LifecycleRouteBundle
 from .long_chain_runner import LongChainRunSummary, LongChainRunner
-from .memory_math_core import DecayKernel, ForgettingScoreVector, MemoryCategory
+from .memory_math_core import DEFAULT_CATEGORY_PROFILES, DecayKernel, ForgettingScoreVector, MemoryCategory
 from .memory_recall_router import L640MemoryRecallRoute, MemoryRecallRouter
 from .memory_store_bridge import MemoryLevel, MemoryRecord, MemoryStoreBridge
 from .p0_system_integration import L638P0SystemIntegrationBridge, build_l6_38_budget_adapter, build_l6_38_handoff_adapter, build_l6_38_p0_report_adapter, build_l6_38_provider_adapter, build_l6_38_skill_adapter
@@ -504,7 +504,8 @@ class RuntimeEntry:
             notes="RuntimeHost initialized; lifecycle is deferred until idle/post-task heartbeat.",
         )
         self.last_result: RuntimeRunResult | None = None
-        self.jingyan_chi = JingyanChi()
+        self.learning_cards = LearningCardStore()
+        self.autonomous_learning = AutonomousLearningPipeline(self.learning_cards)
         self.experience_bridge = ExperienceSynthesisBridge()
 
     def run_model_chat(
@@ -639,10 +640,28 @@ class RuntimeEntry:
         return {
             "schema": "tiangong.runtime_host.experience_snapshot.v1",
             "status": "available",
-            "sink": "jingyan_chi_and_memory_store",
-            "summary": "任务后处理会沉淀经验，后台学习链按自由意志频率消费经验池。",
+            "sink": "learning_card_pipeline_and_memory_store",
+            "summary": "Experience is stored in memory; learning cards are created by L3 memory projection or explicit learning requests.",
             "runtime_host_only": True,
         }
+
+    def learning_card_snapshot(self) -> dict[str, Any]:
+        try:
+            return self.autonomous_learning.snapshot()
+        except Exception as exc:
+            return {
+                "schema": "tiangong.desktop.learning_card_snapshot.v1",
+                "status": "failed",
+                "path": "",
+                "total": 0,
+                "pending_learning": 0,
+                "candidate_ready": 0,
+                "learned": 0,
+                "learned_no_asset": 0,
+                "failed": 0,
+                "latest": [],
+                "error": exc.__class__.__name__,
+            }
 
     def skill_queue_snapshot(self) -> dict[str, Any]:
         return {
@@ -754,8 +773,91 @@ class RuntimeEntry:
             "review_count": len(self._last_forget_review_decisions),
             "last_error": self._last_forget_review_error,
             "decisions": [decision.public_dict() for decision in self._last_forget_review_decisions],
-            "no_physical_delete": True,
-            "no_memory_mutation": True,
+            "no_direct_suggestion_delete": True,
+            "curve_physical_delete_supported": True,
+            "curve_physical_delete_scope": "L1_L2_L3_L4",
+            "l1_delete_policy": "forgetting_score_formula",
+            "l1_delete_turn_count_gate": False,
+            "l1_delete_latest_count_protection": False,
+            "l1_delete_gate": "category_dynamic_threshold_min_0.44_max_0.78",
+            "curve_protected_levels": ["L5"],
+            "memory_executor_can_mutate": True,
+        }
+
+    def _memory_store_heartbeat_counts(self) -> dict[str, Any]:
+        levels = {"L1": 0, "L2": 0, "L3": 0, "L4": 0, "L5": 0}
+        if self._memory_store is None:
+            return {"attached": False, "active": 0, "levels": levels, "event_count": 0, "delete_markers": 0}
+        try:
+            records = self._memory_store.active_records()
+            for record in records:
+                key = str(getattr(record.memory_level, "value", record.memory_level) or "").upper()
+                levels[key] = levels.get(key, 0) + 1
+            events = self._memory_store.read_events()
+            return {
+                "attached": True,
+                "active": len(records),
+                "levels": levels,
+                "event_count": len(events),
+                "delete_markers": sum(1 for event in events if event.get("event_type") == "physical_delete_applied"),
+            }
+        except Exception as exc:
+            return {"attached": True, "active": 0, "levels": levels, "event_count": 0, "delete_markers": 0, "error": exc.__class__.__name__}
+
+    def _memory_file_heartbeat_counts(self) -> dict[str, int]:
+        counts = {"L2": 0, "L3": 0, "L4": 0, "L5": 0}
+        categories = ["working", "episodic", "semantic", "procedural", "self", "runtime"]
+        try:
+            counts["L2"] = len(list(self._jiyi_mulu("l2").glob("*.tst")))
+            counts["L3"] = sum(len(list(self._jiyi_mulu("l3", fenlei=category).glob("*.l3"))) for category in categories)
+            counts["L4"] = sum(len(list(self._jiyi_mulu("l4", fenlei=category).glob("*.l4"))) for category in categories)
+            counts["L5"] = sum(len(list(self._jiyi_mulu("l5", fenlei=category).glob("*.l5"))) for category in categories)
+        except Exception:
+            pass
+        return counts
+
+    def run_memory_forgetting_heartbeat(self) -> dict[str, Any]:
+        start = time()
+        before_store = self._memory_store_heartbeat_counts()
+        before_files = self._memory_file_heartbeat_counts()
+        ok = True
+        error = ""
+        try:
+            self._jiancha_jinsheng_yu_yiwang()
+        except Exception as exc:
+            ok = False
+            error = f"{exc.__class__.__name__}: {exc}"
+        after_store = self._memory_store_heartbeat_counts()
+        after_files = self._memory_file_heartbeat_counts()
+
+        def _delta(before: dict[str, int], after: dict[str, int]) -> dict[str, int]:
+            return {key: int(after.get(key, 0)) - int(before.get(key, 0)) for key in sorted(set(before) | set(after))}
+
+        return {
+            "schema": "tiangong.runtime_host.memory_forgetting_heartbeat.v1",
+            "ok": ok,
+            "ran_at": start,
+            "duration_ms": int((time() - start) * 1000),
+            "error": error,
+            "policy": {
+                "default_desktop_interval_ms": 30 * 60 * 1000,
+                "l1_delete_policy": "forgetting_score_formula",
+                "l1_delete_turn_count_gate": False,
+                "l1_delete_latest_count_protection": False,
+                "l2_inactive_days_delete": self.L2_YIWANG_TIAN,
+                "l3_inactive_days_delete": self.L3_YIWANG_TIAN,
+                "l4_inactive_days_delete": self.L4_YIWANG_TIAN,
+                "protected_levels": ["L5"],
+                "physical_delete_supported": True,
+            },
+            "before": {"store": before_store, "files": before_files},
+            "after": {"store": after_store, "files": after_files},
+            "delta": {
+                "store_active": int(after_store.get("active", 0)) - int(before_store.get("active", 0)),
+                "store_levels": _delta(before_store.get("levels", {}), after_store.get("levels", {})),
+                "store_delete_markers": int(after_store.get("delete_markers", 0)) - int(before_store.get("delete_markers", 0)),
+                "files": _delta(before_files, after_files),
+            },
         }
 
     def lifecycle_runtime_snapshot(self) -> dict[str, Any]:
@@ -775,7 +877,6 @@ class RuntimeEntry:
         return {
             "schema": "tiangong.runtime_host.interface_wiring_snapshot.v1",
             "runtime_entry": "RuntimeHost",
-            "legacy_runtime_entry": "removed_from_main_chain",
             "activation": self._last_activation_snapshot.public_dict(),
             "affective": self.affective_runtime_snapshot(),
             "memory_recall": self.memory_recall_runtime_snapshot(),
@@ -829,28 +930,19 @@ class RuntimeEntry:
 
         p5_jieguo = ""
         if pao_p5:
-            from .free_will_suiji_yinqing import ZiyouYizhiYinqing
-            yinqing = ZiyouYizhiYinqing(moxing_kehuduan=legacy_client)
-            chanchu_liebiao = yinqing.yunxing()
-            jieguo_parts: list[str] = []
-            for c in chanchu_liebiao:
-                if c.leixing == "xitong_gaijin":
-                    tiao = chi.tousu(legacy_client, c.dongzuo_ming,
-                                     f"来源：{c.laiyuan_xinxi}\n发现：{c.neirong}")
-                    jieguo_parts.append(
-                        f"[{c.dongzuo_ming}] →迭代池 #{tiao.tiao_id}" if tiao
-                        else f"[{c.dongzuo_ming}] →迭代池(LLM判不需要)"
-                    )
-                elif c.leixing == "zhishi_jineng":
-                    self.jingyan_chi.touru("free_will", c.neirong, c.laiyuan_xinxi)
-                    lian_jg = self._run_free_will_learning_chain(
-                        model_client, TurnContext.create("xintiao_p5", max_steps=10), model_config=model_config)
-                    jieguo_parts.append(
-                        f"[{c.dongzuo_ming}] →自学链 {lian_jg[:60] if lian_jg else '已处理'}"
-                    )
-                else:
-                    jieguo_parts.append(f"[{c.dongzuo_ming}] {c.zhaiyao[:60]}")
-            p5_jieguo = " | ".join(jieguo_parts) if jieguo_parts else "无产出"
+            heartbeat_context = TurnContext.create(
+                "xintiao_p5_learning_card",
+                max_steps=10,
+                model_config=model_config,
+                model_client=model_client,
+            )
+            p5_jieguo = self.run_learning_card_now(
+                model_client,
+                heartbeat_context,
+                "__next__",
+                model_config=model_config,
+                run_mode="heartbeat",
+            )
 
         return {
             "kongxian_miao": kongxian_miao,
@@ -1007,6 +1099,96 @@ class RuntimeEntry:
     L3_SHENG_L4 = 5    # L3 检索命中 ≥ 5 次
     L4_SHENG_L5 = 10   # L4 检索命中 ≥ 10 次
 
+    @staticmethod
+    def _looks_like_l5_memory_request(text: str) -> bool:
+        compact = re.sub(r"\s+", "", str(text or "").lower())
+        return any(marker in compact for marker in ("永远记住", "永久记住", "永不忘记", "不要忘记", "不要忘", "一直记住"))
+
+    @staticmethod
+    def _looks_like_l3_memory_request(text: str) -> bool:
+        compact = re.sub(r"\s+", "", str(text or "").lower())
+        return any(marker in compact for marker in ("帮我记住", "记住", "记下来", "存到记忆", "以后记得", "你要记得"))
+
+    @staticmethod
+    def _memory_category_dir(category_value: str) -> str:
+        text = str(category_value or "episodic_memory").strip()
+        return text.replace("_memory", "") or "episodic"
+
+    def _write_direct_memory_card(
+        self,
+        *,
+        level: MemoryLevel,
+        content: str,
+        reply: str = "",
+        route: str = "explicit_memory",
+        fenlei: str = "episodic_memory",
+        qinggan: str = "",
+    ) -> str:
+        from datetime import datetime
+        memory_id = f"{level.value.lower()}_{uuid4().hex[:12]}"
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+        suffix = ".l3" if level is MemoryLevel.L3 else ".l5"
+        folder_level = "l3" if level is MemoryLevel.L3 else "l5"
+        target = self._jiyi_mulu(folder_level, fenlei=self._memory_category_dir(fenlei)) / f"{memory_id}{suffix}"
+        card = f"""# {level.value} 事件记忆
+- 记录时间：{now_str}
+- 记忆ID：{memory_id}
+- 情感标记：{qinggan or "平静"}
+- 命中次数：0
+- 分类：{fenlei}
+- 来源：{route}
+
+## 事件概况
+用户明确要求保存这条记忆：{content}
+
+## 框架起因
+用户用指定性记忆表达触发保存，因此不走普通 L1 候选等待。
+
+## 经过
+系统识别到用户的指定性记忆意图，将该内容直接写入 {level.value}。
+
+## 结果
+记忆已作为 {level.value} 事件卡存档，并同步写入 memory_store。
+
+## 当前状态
+可参与后续检索和上下文拼接。
+
+## 记忆用途
+用于长期还原用户明确指定的事实、偏好或约束。
+
+## 原始片段
+- 用户：{content}
+- 助手：{reply}
+
+## 备注
+direct_memory_level={level.value}; route={route}
+"""
+        target.write_text(card, encoding="utf-8")
+        if self._memory_store:
+            try:
+                self._memory_store.add_candidate(MemoryRecord(
+                    memory_id=memory_id,
+                    memory_level=level,
+                    memory_category=MemoryCategory(fenlei),
+                    sanitized_summary=f"用户指定保存：{content[:300]}",
+                    confidence_score=0.90 if level is MemoryLevel.L3 else 0.98,
+                    importance_score=0.78 if level is MemoryLevel.L3 else 0.96,
+                    task_relevance_score=0.75,
+                    retention_policy_ref=f"policy:direct_user_memory_{level.value.lower()}",
+                    emotional_tag=qinggan,
+                    event_summary=f"用户指定保存：{content[:180]}",
+                    event_cause="用户明确要求记住该内容。",
+                    event_process=f"系统将该内容直接写入 {level.value} 事件卡。",
+                    event_result=f"已保存为 {level.value} 指定性记忆。",
+                    event_current_state="可用于后续检索和上下文拼接。",
+                    event_usage="长期保存用户明确指定的事实、偏好或约束。",
+                    original_user_excerpt=content[:500],
+                    assistant_reply_excerpt=reply[:500],
+                ))
+            except Exception:
+                pass
+        return memory_id
+
     def remember_turn(self, xiaoxi: str, huifu: str, lujing: str = "chat") -> str | None:
         """供 CLI loop 调用的统一记忆落盘入口。L1 JSONL 落盘（_lunshu 与遗忘检查已由 _remember 统一处理）。"""
         jiyi_id = None
@@ -1025,12 +1207,24 @@ class RuntimeEntry:
                 pass
             # 关键词判定记忆分类
             fenlei = self._panding_fenlei(xiaoxi)
+            if self._looks_like_l5_memory_request(xiaoxi):
+                return self._write_direct_memory_card(level=MemoryLevel.L5, content=xiaoxi, reply=huifu, route=lujing, fenlei=fenlei, qinggan=qinggan)
+            if self._looks_like_l3_memory_request(xiaoxi):
+                return self._write_direct_memory_card(level=MemoryLevel.L3, content=xiaoxi, reply=huifu, route=lujing, fenlei=fenlei, qinggan=qinggan)
             jiyi_id = f"mem_{uuid4().hex[:12]}"
             record = MemoryRecord(
                 memory_id=jiyi_id,
                 memory_category=MemoryCategory(fenlei),
                 sanitized_summary=summary[:500],
                 emotional_tag=qinggan,
+                event_summary=f"用户提出或表达：{xiaoxi[:180]}",
+                event_cause=f"用户在本轮对话中发起请求或表达信息：{xiaoxi[:240]}",
+                event_process=f"助手围绕该请求给出回应或处理：{huifu[:260]}" if huifu else "本轮尚未形成可用的助手回应片段。",
+                event_result=f"本轮回复结果：{huifu[:260]}" if huifu else "结果待后续对话补全。",
+                event_current_state=f"作为 {lujing} 路径产生的 L1 候选记忆保存，等待复用或晋升。",
+                event_usage="用于后续还原事件的起因、经过和结果，并参与上下文检索。",
+                original_user_excerpt=xiaoxi[:500],
+                assistant_reply_excerpt=huifu[:500],
             )
             if self._memory_store:
                 self._memory_store.add_candidate(record)
@@ -1065,13 +1259,65 @@ class RuntimeEntry:
             return "working_memory"
         return "episodic_memory"
 
+    @staticmethod
+    def _clamp_score(value: float) -> float:
+        try:
+            return max(0.0, min(1.0, float(value)))
+        except Exception:
+            return 0.0
+
+    @staticmethod
+    def _record_success_rate(record: MemoryRecord) -> float:
+        total = max(0, int(record.success_count)) + max(0, int(record.failure_count))
+        if total <= 0:
+            return 0.0
+        return RuntimeEntry._clamp_score(max(0, int(record.success_count)) / total)
+
+    def _l1_forgetting_vector(self, record: MemoryRecord, *, now: float | None = None) -> ForgettingScoreVector:
+        now_ts = time() if now is None else float(now)
+        last_accessed = float(record.last_accessed_at or record.created_at or now_ts)
+        half_life = max(float(record.half_life_seconds or 6 * 60 * 60), 60.0)
+        recall_strength = DecayKernel(half_life_seconds=half_life).strength(last_accessed, now=now_ts)
+        success = self._record_success_rate(record)
+        reuse = self._clamp_score(record.reuse_count / 5.0)
+        freshness_debt = 1.0 - recall_strength
+        low_reuse_score = self._clamp_score((1.0 - reuse) * freshness_debt)
+        low_confidence_score = self._clamp_score((1.0 - record.confidence_score) * freshness_debt)
+        compression_gain = self._clamp_score((1.0 - record.importance_score) * freshness_debt)
+        user_forget_signal = 1.0 if record.user_forget_request_ref else 0.0
+        return ForgettingScoreVector(
+            reuse_score=reuse,
+            recall_strength=recall_strength,
+            success_rate=success,
+            age_score=freshness_debt,
+            low_confidence_score=low_confidence_score,
+            conflict_score=record.conflict_score,
+            compression_gain=compression_gain,
+            privacy_minimization_need=record.privacy_risk_score,
+            user_forget_signal=user_forget_signal,
+            explicit_user_forget_request=bool(record.user_forget_request_ref),
+            protected_l5_rule_score=0.0,
+        )
+
+    def _l1_forgetting_delete_decision(self, record: MemoryRecord, *, now: float | None = None) -> tuple[bool, float, float]:
+        vector = self._l1_forgetting_vector(record, now=now)
+        if vector.explicit_user_forget_request:
+            return (True, vector.forgetting_score, 0.0)
+        try:
+            profile = DEFAULT_CATEGORY_PROFILES.get(MemoryCategory(record.memory_category))
+            base = max(float(profile.demotion_threshold if profile else 0.30), 0.52)
+        except Exception:
+            base = 0.52
+        gate = vector.forgetting_state.threshold(base, minimum=0.44, maximum=0.78)
+        return (vector.forgetting_score >= gate, vector.forgetting_score, gate)
+
     def _jiancha_jinsheng_yu_yiwang(self) -> None:
         """全级别晋升检查 + 遗忘检查。
-        L1: 2000轮触发，清理 reuse_count=0 且非最近100条
-        L2: 30天未命中 → 删除
-        L3: 60天未命中 → 降回 L2
-        L4: 90天未命中 → 降回 L3
-        L5: 永不遗忘
+        L1: 使用遗忘公式逐条判断删除
+        L2: 15天未命中 → 删除
+        L3: 45天未命中 → 删除
+        L4: 90天未命中 → 删除
+        L5: 永久保护，不参与删除
         """
         if self._memory_store is None:
             return
@@ -1082,18 +1328,50 @@ class RuntimeEntry:
                     self._xie_l2_tst(record)
         except Exception:
             pass
-        # L1 遗忘：2000轮触发，保留最近100条
-        if self._lunshu > 0 and self._lunshu % 2000 == 0:
-            try:
-                records = sorted(self._memory_store.active_records(), key=lambda r: r.created_at, reverse=True)
-                baoliu = {r.memory_id for r in records[:100]}
-                for record in records[100:]:
-                    if record.reuse_count == 0 and record.memory_level.value != "L5":
-                        self._memory_store.mark_tombstone(record.memory_id)
-            except Exception:
-                pass
-        # L2-L4 遗忘：每次检查（按文件 mtime，天数阈值）
+        # L1 遗忘：每次检查都按遗忘公式逐条判断，不再使用 2000 轮或最近 100 条保护。
+        try:
+            now_ts = time()
+            for record in [r for r in self._memory_store.active_records() if r.memory_level.value == "L1"]:
+                should_delete, score, gate = self._l1_forgetting_delete_decision(record, now=now_ts)
+                if not should_delete:
+                    continue
+                reason = f"forgetting:l1_formula_score_{score:.3f}_gate_{gate:.3f}"
+                delete_fn = getattr(self._memory_store, "physical_delete", None)
+                if callable(delete_fn):
+                    delete_fn(record.memory_id, reason_ref=reason, expected_level=MemoryLevel.L1)
+                else:
+                    self._memory_store.mark_tombstone(record.memory_id, reason_ref=reason)
+        except Exception:
+            pass
+        # L2-L4 遗忘：每次检查（按文件 mtime，天数阈值），L5 不参与。
         self._yiwang_l2_l4()
+
+    @staticmethod
+    def _split_turn_summary(summary: str) -> tuple[str, str]:
+        text = str(summary or "").strip()
+        if not text:
+            return ("", "")
+        match = re.search(r"用户:\s*(.*?)(?:\s*\|\s*助手:\s*(.*))?$", text, re.S)
+        if not match:
+            return (text, "")
+        return ((match.group(1) or "").strip(), (match.group(2) or "").strip())
+
+    def _l2_event_fields_from_record(self, record: MemoryRecord) -> dict[str, str]:
+        user_excerpt = getattr(record, "original_user_excerpt", "") or ""
+        assistant_excerpt = getattr(record, "assistant_reply_excerpt", "") or ""
+        parsed_user, parsed_assistant = self._split_turn_summary(record.sanitized_summary)
+        user_excerpt = user_excerpt or parsed_user or record.sanitized_summary
+        assistant_excerpt = assistant_excerpt or parsed_assistant
+        return {
+            "event_summary": getattr(record, "event_summary", "") or f"用户提出：{user_excerpt}",
+            "event_cause": getattr(record, "event_cause", "") or f"用户发起请求或表达信息：{user_excerpt}",
+            "event_process": getattr(record, "event_process", "") or (f"助手围绕该请求给出回应：{assistant_excerpt}" if assistant_excerpt else "L1 中没有可用的助手回应片段。"),
+            "event_result": getattr(record, "event_result", "") or (f"本轮形成回应：{assistant_excerpt}" if assistant_excerpt else "事件结果待后续检索或人工修订补全。"),
+            "event_current_state": getattr(record, "event_current_state", "") or "已从 L1 候选记忆晋升为 L2 事件卡。",
+            "event_usage": getattr(record, "event_usage", "") or "用于还原事件起因、经过和结果，并为后续上下文提供背景。",
+            "original_user": user_excerpt,
+            "assistant_reply": assistant_excerpt,
+        }
 
     def _xie_l2_tst(self, record: MemoryRecord) -> None:
         """L1 记忆 → L2 TST 事件文件。"""
@@ -1101,6 +1379,7 @@ class RuntimeEntry:
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
         qinggan = record.emotional_tag or "平静"
         dianping = record.ai_comment or "（暂无点评）"
+        fields = self._l2_event_fields_from_record(record)
         neirong = f"""# TST 事件记忆 (L2)
 - 记录时间：{now_str}
 - 记忆ID：{record.memory_id}
@@ -1109,17 +1388,34 @@ class RuntimeEntry:
 - 命中次数：0
 - 分类：{record.memory_category.value}
 
+## 事件概况
+{fields["event_summary"]}
+
 ## 框架起因
-{record.sanitized_summary}
+{fields["event_cause"]}
 
-## 进展
-已被检索 {record.reuse_count} 次，置信度 {record.confidence_score:.2f}
+## 经过
+{fields["event_process"]}
 
-## 现状
-L2 事件记忆，参与检索拼接
+晋升依据：这条候选记忆在 L1 中累计被成功检索/复用 {record.reuse_count} 次，达到 L1->L2 的晋升阈值。
 
-## 相关记忆链接
-（通过 memory_id 关联）
+## 结果
+{fields["event_result"]}
+
+存档结果：生成 L2 TST 事件卡，作为可检索的事件记忆参与后续上下文拼接。
+
+## 当前状态
+{fields["event_current_state"]}
+
+## 记忆用途
+{fields["event_usage"]}
+
+## 原始片段
+- 用户：{fields["original_user"]}
+- 助手：{fields["assistant_reply"]}
+
+## 备注
+reuse_count={record.reuse_count}; confidence={record.confidence_score:.2f}; retention={record.retention_policy_ref}
 """
         lujing = self._jiyi_mulu("l2") / f"{record.memory_id}.tst"
         lujing.write_text(neirong, encoding="utf-8")
@@ -1189,6 +1485,11 @@ L2 事件记忆，参与检索拼接
         xin_neirong = neirong + zhuijia
         xin_lujing = self._jiyi_mulu(mubiao, fenlei=fenlei) / (yuan_lujing.stem + xin_houzhui)
         xin_lujing.write_text(xin_neirong, encoding="utf-8")
+        try:
+            if self._memory_store:
+                self._memory_store._append_event(f"promoted_to_{mubiao}", yuan_lujing.stem, {"new_level": mubiao.upper(), "file": str(xin_lujing)})
+        except Exception:
+            pass
         # 删除原文件（已晋升）
         try:
             yuan_lujing.unlink()
@@ -1197,85 +1498,76 @@ L2 事件记忆，参与检索拼接
 
     # ── L2-L4 天数遗忘 ──────────────────────────
 
-    L2_YIWANG_TIAN = 15   # L2 15天未命中 → 删除（命中率高，周期短）
-    L3_YIWANG_TIAN = 45   # L3 45天未命中 → 降回 L2
-    L4_YIWANG_TIAN = 90   # L4 90天未命中 → 降回 L3
+    L2_YIWANG_TIAN = 15   # L2 15天未命中 → 删除
+    L3_YIWANG_TIAN = 45   # L3 45天未命中 → 删除
+    L4_YIWANG_TIAN = 90   # L4 90天未命中 → 删除
 
     def _yiwang_l2_l4(self) -> None:
-        """按天数清理 L2-L4 文件记忆。"""
+        """按遗忘曲线直接删除 L2-L4 文件记忆；L5 不参与。"""
         from datetime import datetime
+
+        def _delete_store_record(memory_id: str, level: MemoryLevel, reason_ref: str) -> None:
+            if not self._memory_store:
+                return
+            try:
+                delete_fn = getattr(self._memory_store, "physical_delete", None)
+                if callable(delete_fn):
+                    delete_fn(memory_id, reason_ref=reason_ref, expected_level=level)
+                else:
+                    self._memory_store.mark_tombstone(memory_id, reason_ref=reason_ref)
+            except Exception:
+                pass
+
         xianzai = datetime.now()
-        # L2: 30天未命中 → 删除
         for wj in self._jiyi_mulu("l2").glob("*.tst"):
             try:
                 mtime = datetime.fromtimestamp(wj.stat().st_mtime)
                 if (xianzai - mtime).days >= self.L2_YIWANG_TIAN:
                     wj.unlink()
+                    _delete_store_record(wj.stem, MemoryLevel.L2, f"forgetting:l2_inactive_{self.L2_YIWANG_TIAN}d")
             except Exception:
                 pass
-        # L3: 45天未命中 → 降回 L2 (遍历所有分类子目录)
+
         FENLEI_L = ["working", "episodic", "semantic", "procedural", "self", "runtime"]
-        l3_wenjian = []
         for f in FENLEI_L:
-            l3_wenjian.extend(self._jiyi_mulu("l3", fenlei=f).glob("*.l3"))
-        for wj in l3_wenjian:
-            try:
-                mtime = datetime.fromtimestamp(wj.stat().st_mtime)
-                if (xianzai - mtime).days >= self.L3_YIWANG_TIAN:
-                    neirong = wj.read_text(encoding="utf-8")
-                    xin_lujing = self._jiyi_mulu("l2") / (wj.stem + ".tst")
-                    # 追加降级记录
-                    neirong += f"\n\n## 降级记录\n- 时间：{xianzai.strftime('%Y-%m-%d %H:%M')}\n- 原因：{self.L3_YIWANG_TIAN}天未命中，从 L3 降回 L2\n"
-                    xin_lujing.write_text(neirong, encoding="utf-8")
-                    wj.unlink()
-            except Exception:
-                pass
-        # L4: 90天未命中 → 降回 L3 (遍历所有分类子目录)
-        l4_wenjian = []
+            for wj in self._jiyi_mulu("l3", fenlei=f).glob("*.l3"):
+                try:
+                    mtime = datetime.fromtimestamp(wj.stat().st_mtime)
+                    if (xianzai - mtime).days >= self.L3_YIWANG_TIAN:
+                        wj.unlink()
+                        _delete_store_record(wj.stem, MemoryLevel.L3, f"forgetting:l3_inactive_{self.L3_YIWANG_TIAN}d")
+                except Exception:
+                    pass
+
         for f in FENLEI_L:
-            l4_wenjian.extend(self._jiyi_mulu("l4", fenlei=f).glob("*.l4"))
-        for wj in l4_wenjian:
-            try:
-                mtime = datetime.fromtimestamp(wj.stat().st_mtime)
-                if (xianzai - mtime).days >= self.L4_YIWANG_TIAN:
-                    neirong = wj.read_text(encoding="utf-8")
-                    xin_lujing = self._jiyi_mulu("l3") / (wj.stem + ".l3")
-                    neirong += f"\n\n## 降级记录\n- 时间：{xianzai.strftime('%Y-%m-%d %H:%M')}\n- 原因：{self.L4_YIWANG_TIAN}天未命中，从 L4 降回 L3\n"
-                    xin_lujing.write_text(neirong, encoding="utf-8")
-                    wj.unlink()
-            except Exception:
-                pass
+            for wj in self._jiyi_mulu("l4", fenlei=f).glob("*.l4"):
+                try:
+                    mtime = datetime.fromtimestamp(wj.stat().st_mtime)
+                    if (xianzai - mtime).days >= self.L4_YIWANG_TIAN:
+                        wj.unlink()
+                        _delete_store_record(wj.stem, MemoryLevel.L4, f"forgetting:l4_inactive_{self.L4_YIWANG_TIAN}d")
+                except Exception:
+                    pass
 
     # ── L5 直通 ──────────────────────────────────
 
     def yongjiu_jiyi(self, xiaoxi: str, beizhu: str = "", fenlei: str = "episodic") -> str:
         """用户说「永远记住」→ 直接写入 L5 永久记忆。"""
-        from datetime import datetime
-        from uuid import uuid4
-        jiyi_id = f"l5_{uuid4().hex[:12]}"
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
         qinggan = ""
         try:
             if self._affective_route:
                 qinggan = getattr(self._affective_route, "dominant_emotion", "") or ""
         except Exception:
             pass
-        neirong = f"""# 永久记忆 (L5)
-- 记录时间：{now_str}
-- 记忆ID：{jiyi_id}
-- 情感标记：{qinggan or "平静"}
-- 命中次数：0
-- 来源：用户主动标记
-
-## 内容
-{xiaoxi}
-
-## 备注
-{beizhu or "用户要求永久记住此内容"}
-"""
-        lujing = self._jiyi_mulu("l5", fenlei=fenlei) / f"{jiyi_id}.l5"
-        lujing.write_text(neirong, encoding="utf-8")
-        return jiyi_id
+        category = fenlei if str(fenlei).endswith("_memory") else f"{fenlei}_memory"
+        return self._write_direct_memory_card(
+            level=MemoryLevel.L5,
+            content=xiaoxi,
+            reply=beizhu,
+            route="yongjiu_jiyi",
+            fenlei=category,
+            qinggan=qinggan,
+        )
 
     # ── 统一检索（L2-L5）──────────────────────
 
@@ -1425,21 +1717,57 @@ L2 事件记忆，参与检索拼接
 
         return _search
 
-    def _run_free_will_learning_chain(self, client: Any, context: Any, jingyan_beizhu: str = "", laiyuan: str = "chat", l3_houxuan: list[dict] | None = None, model_config: Any | None = None, target_tiao_id: str = "") -> str:
-        """自由意志学习链：扫池→搜索→学习→判→生成 skill/tool。L3 优先。"""
-        effective_config = model_config or getattr(context, "model_config", None)
-        lian = XuexiLian(
-            _legacy_completion_client(client, effective_config),
-            jingyan_chi=self.jingyan_chi,
-            web_searcher=self._make_learning_web_searcher(context, model_config=effective_config, model_client=client),
+    def ingest_learning_from_turn(
+        self,
+        xiaoxi: str,
+        huifu: str,
+        lujing: str = "chat",
+        *,
+        client: Any = None,
+        model_config: Any | None = None,
+        workspace: str | Path | None = None,
+    ) -> dict[str, Any]:
+        """Compatibility shim: normal turns must not directly create learning cards."""
+        return {"ok": True, "card": {}, "created": False, "reason": "post_turn_learning_card_disabled"}
+
+    def create_learning_card_from_request(
+        self,
+        xiaoxi: str,
+        *,
+        learning_result: str = "",
+        lujing: str = "active_learning_skill",
+        client: Any = None,
+        model_config: Any | None = None,
+        workspace: str | Path | None = None,
+        skill_names: list[str] | None = None,
+    ) -> dict[str, Any] | None:
+        """Create a learning card only for explicit user learning requests."""
+        legacy_client = _legacy_completion_client(client, model_config)
+        return self.autonomous_learning.make_card_from_learning_request(
+            request=xiaoxi,
+            learning_result=learning_result,
+            route=lujing or "active_learning_skill",
+            workspace=str(workspace or ""),
+            selected_skills=skill_names or [],
+            model_client=legacy_client,
         )
-        xiaoxi = getattr(context, 'user_message', '') or ''
-        return lian.yunxing(
-            yuanshi_xiaoxi=xiaoxi,
-            jingyan_beizhu=jingyan_beizhu,
-            laiyuan=laiyuan,
-            l3_houxuan=l3_houxuan,
-            target_tiao_id=target_tiao_id,
+
+    def run_learning_card_now(
+        self,
+        client: Any,
+        context: Any,
+        card_id: str = "__next__",
+        *,
+        model_config: Any | None = None,
+        run_mode: str = "manual_now",
+    ) -> str:
+        effective_config = model_config or getattr(context, "model_config", None)
+        legacy_client = _legacy_completion_client(client, effective_config)
+        return self.autonomous_learning.execute_card(
+            card_id or "__next__",
+            model_client=legacy_client,
+            run_mode=run_mode,
+            web_searcher=self._make_learning_web_searcher(context, model_config=effective_config, model_client=client),
         )
 
     def _make_turn_context(self, xiaoxi: str, *, workspace: str | Path | None = None) -> Any:
@@ -1458,36 +1786,8 @@ L2 事件记忆，参与检索拼接
             pass
 
     def _panding_xuexi(self, xiaoxi: str, touying: Any, client: Any) -> None:
-        """⑥ 自主学习判定：优先从 L3 记忆库选题，无 L3 则回退经验池。"""
-        try:
-            zhaiyao = getattr(touying, 'summary', '') or str(touying)[:300]
-            # 先检查 L3 记忆库
-            l3_houxuan = self._du_weixuexi_l3()
-            if l3_houxuan and client is not None:
-                # L3 有候选 → 直接走学习链
-                self._run_free_will_learning_chain(
-                    client, self._make_turn_context(xiaoxi),
-                    jingyan_beizhu=zhaiyao, laiyuan="l3",
-                    l3_houxuan=l3_houxuan,
-                )
-                return
-            # 无 L3 → 回退经验池
-            self.jingyan_chi.touru("runtime_task", zhaiyao, xiaoxi[:200])
-            weichuli = self.jingyan_chi.weichuli_tiaomu(xianzhi=1)
-            if weichuli and client is not None:
-                panjue = self._llm_quick_judge(
-                    client,
-                    "你是学习判定器。只输出JSON。",
-                    f"经验：{zhaiyao[:300]}\n任务：{xiaoxi[:200]}\n"
-                    '输出JSON：{"zhide_xue": true/false, "liyou":"理由≤20字"}'
-                )
-                if panjue.get("zhide_xue"):
-                    self._run_free_will_learning_chain(
-                        client, self._make_turn_context(xiaoxi),
-                        jingyan_beizhu=zhaiyao, laiyuan="chat",
-                    )
-        except Exception:
-            pass
+        """⑥ 自主学习判定：普通执行链不直接造学习卡。"""
+        return None
 
     def _du_weixuexi_l3(self) -> list[dict]:
         """读取 L3 目录中尚未学习的文件，返回候选列表。遍历所有分类子目录。"""
@@ -1573,6 +1873,7 @@ def build_default_registry() -> RuntimeToolRegistry:
     _zc_zhuce(registry, "http_client", "HTTP client for governed GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS requests.", "A3", http_client_adapter)
     _zc_zhuce(registry, "protocol_adapter", "Normalize URL/cURL/API request inputs into an auditable http_client request.", "A2", protocol_adapter_adapter)
     _zc_zhuce(registry, "web_search", "联网搜索并返回中文证据包：综合摘要、来源标题、发布时间、完整链接和不确定点。", "A3", web_search_adapter)
+    _zc_zhuce(registry, "web_download", "从公开 HTTPS/HTTP URL 下载文件到当前工作区，受网络策略、大小、超时和工作区边界约束。", "A3", web_download_adapter)
     _zc_zhuce(registry, "web_readability_extract", "读取指定 URL 或已给 HTML/正文并清洗出正文文本，供搜索结果复核和总结。", "A2", web_readability_extract_adapter)
     _register_runtime_host_plugin_tools(registry, project_index, diagnostics, quality_gate, delivery_manifest)
     _zc_zhuce(registry, "runtime_tool_alignment_check", "Check Runtime tool registry and LLM usage card alignment.", "A1", build_runtime_tool_alignment_adapter(lambda: registry.describe()))

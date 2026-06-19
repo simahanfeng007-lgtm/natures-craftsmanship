@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import ipaddress
 import json
+import re
 import socket
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Any, Mapping
 
 from tiangong_agent_shell.network_policy import NetworkPolicyError, validate_url, urlopen_with_policy
@@ -18,6 +21,7 @@ from ..result_normalizer import truncate_text
 from ..tool_invocation import ToolInvocation
 from ..tool_result import ToolResult, ToolResultStatus
 from ..turn_context import TurnContext
+from ..workspace_guard import WorkspaceGuard, WorkspaceViolation
 
 
 _ALLOWED_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
@@ -30,6 +34,7 @@ _SAFE_RESPONSE_HEADERS = {
     "etag",
     "cache-control",
     "location",
+    "content-disposition",
 }
 
 
@@ -224,6 +229,105 @@ def _http_request(invocation: ToolInvocation, context: TurnContext, *, tool_labe
         return ToolResult(invocation.step_id, invocation.tool_name, ToolResultStatus.FAILED, f"{tool_label}失败：{exc}", error_code="network_request_failed", data={"error": str(exc)})
 
 
+def web_download_adapter(invocation: ToolInvocation, context: TurnContext) -> ToolResult:
+    args = dict(invocation.arguments or {})
+    url = str(args.get("url") or args.get("href") or args.get("link") or _first_url(context.user_message) or "").strip()
+    if not url:
+        return ToolResult(invocation.step_id, invocation.tool_name, ToolResultStatus.FAILED, "下载失败：缺少 URL。", error_code="url_missing")
+
+    timeout = _clamp_float(args.get("timeout_sec") or args.get("timeout"), minimum=3.0, maximum=120.0, default=30.0)
+    max_bytes = _clamp_int(args.get("max_bytes"), minimum=1024, maximum=200 * 1024 * 1024, default=50 * 1024 * 1024)
+    allow_loopback_http = bool(args.get("allow_loopback_http", False))
+    allow_private_network = bool(args.get("allow_private_network", False))
+    overwrite = bool(args.get("overwrite", False))
+
+    try:
+        validate_url(url, allow_loopback_http=allow_loopback_http, purpose=invocation.tool_name)
+        _validate_private_boundary(url, timeout=timeout, allow_private_network=allow_private_network)
+    except NetworkPolicyError as exc:
+        return ToolResult(invocation.step_id, invocation.tool_name, ToolResultStatus.BLOCKED, str(exc), error_code="network_policy_blocked")
+
+    headers = _safe_headers(args.get("headers") or {})
+    request = urllib.request.Request(url=url, method="GET", headers=headers)
+    started = time.perf_counter()
+    try:
+        with urlopen_with_policy(request, timeout=timeout, allow_loopback_http=allow_loopback_http, purpose=invocation.tool_name) as response:
+            status_code = int(getattr(response, "status", getattr(response, "code", 0)) or 0)
+            response_headers = _response_headers(getattr(response, "headers", {}) or {})
+            content_type = str(response_headers.get("content-type") or "")
+            filename = _download_filename(url, response_headers)
+            target_arg = str(args.get("target") or args.get("path") or args.get("filename") or "").strip()
+            target_rel = _download_target(target_arg, filename)
+            guard = WorkspaceGuard(context.workspace)
+            try:
+                target = guard.resolve_for_artifact(target_rel)
+            except WorkspaceViolation as exc:
+                return ToolResult(invocation.step_id, invocation.tool_name, ToolResultStatus.BLOCKED, str(exc), error_code="workspace_violation")
+            if target.exists() and not overwrite:
+                return ToolResult(
+                    invocation.step_id,
+                    invocation.tool_name,
+                    ToolResultStatus.BLOCKED,
+                    f"下载目标已存在：{_workspace_relative(target, context.workspace)}。如需覆盖请传 overwrite=true。",
+                    error_code="target_exists",
+                    data={"path": _workspace_relative(target, context.workspace), "absolute_path": str(target)},
+                )
+
+            tmp = target.with_name(target.name + ".download")
+            sha = hashlib.sha256()
+            total = 0
+            try:
+                with tmp.open("wb") as handle:
+                    while True:
+                        chunk = response.read(65536)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > max_bytes:
+                            raise ValueError(f"download exceeds max_bytes={max_bytes}")
+                        sha.update(chunk)
+                        handle.write(chunk)
+                tmp.replace(target)
+            except Exception:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                raise
+    except urllib.error.HTTPError as exc:
+        return ToolResult(invocation.step_id, invocation.tool_name, ToolResultStatus.FAILED, f"下载失败：HTTP {exc.code}", error_code="http_error", data={"status_code": int(exc.code or 0), "url": url})
+    except TimeoutError as exc:
+        return ToolResult(invocation.step_id, invocation.tool_name, ToolResultStatus.TIMEOUT, f"下载超时：{exc}", error_code="network_timeout")
+    except urllib.error.URLError as exc:
+        reason = getattr(exc, "reason", exc)
+        return ToolResult(invocation.step_id, invocation.tool_name, ToolResultStatus.FAILED, f"下载失败：{reason}", error_code="network_request_failed", data={"error": str(reason)})
+    except ValueError as exc:
+        return ToolResult(invocation.step_id, invocation.tool_name, ToolResultStatus.BLOCKED, f"下载已中止：{exc}", error_code="download_too_large")
+    except Exception as exc:
+        return ToolResult(invocation.step_id, invocation.tool_name, ToolResultStatus.FAILED, f"下载失败：{exc}", error_code="download_failed", data={"error": str(exc)})
+
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
+    rel_path = _workspace_relative(target, context.workspace)
+    summary = f"下载完成：{rel_path}（{total} bytes，sha256={sha.hexdigest()[:16]}...）"
+    return ToolResult(
+        invocation.step_id,
+        invocation.tool_name,
+        ToolResultStatus.OK,
+        truncate_text(summary, context.policy.max_output_chars),
+        data={
+            "url": url,
+            "status_code": status_code,
+            "path": rel_path,
+            "absolute_path": str(target),
+            "bytes_written": total,
+            "sha256": sha.hexdigest(),
+            "content_type": content_type,
+            "headers": response_headers,
+            "elapsed_ms": elapsed_ms,
+        },
+    )
+
+
 def _response_result(invocation: ToolInvocation, context: TurnContext, response: Any, *, url: str, started: float, max_bytes: int) -> ToolResult:
     raw = response.read(max_bytes + 1)
     truncated = len(raw) > max_bytes
@@ -254,6 +358,49 @@ def _response_result(invocation: ToolInvocation, context: TurnContext, response:
             "elapsed_ms": elapsed_ms,
         },
     )
+
+
+def _download_filename(url: str, headers: Mapping[str, str]) -> str:
+    disposition = str(headers.get("content-disposition") or "")
+    filename = ""
+    match = re.search(r"filename\*\s*=\s*([^']*)''([^;]+)", disposition, flags=re.I)
+    if match:
+        filename = urllib.parse.unquote(match.group(2).strip().strip('"'))
+    if not filename:
+        match = re.search(r'filename\s*=\s*"?([^";]+)"?', disposition, flags=re.I)
+        if match:
+            filename = match.group(1).strip()
+    if not filename:
+        parsed = urllib.parse.urlparse(url)
+        filename = urllib.parse.unquote(Path(parsed.path).name or "")
+    return _safe_download_filename(filename or "download.bin")
+
+
+def _safe_download_filename(value: str) -> str:
+    name = str(value or "").replace("\\", "/").rsplit("/", 1)[-1].strip().strip(".")
+    name = re.sub(r"[^A-Za-z0-9._ -]+", "_", name)
+    name = re.sub(r"\s+", " ", name).strip(" .")
+    if not name or name in {".", ".."}:
+        name = "download.bin"
+    return name[:180]
+
+
+def _download_target(target_arg: str, filename: str) -> str:
+    raw = str(target_arg or "").strip()
+    if not raw:
+        return f"downloads/{filename}"
+    if raw.endswith(("/", "\\")):
+        return raw + filename
+    if Path(raw).suffix:
+        return raw
+    return str(Path(raw) / filename)
+
+
+def _workspace_relative(path: Path, workspace: str | Path) -> str:
+    try:
+        return path.resolve().relative_to(Path(workspace).resolve()).as_posix()
+    except Exception:
+        return str(path)
 
 
 def _request_body(args: Mapping[str, Any], headers: dict[str, str]) -> bytes | None:

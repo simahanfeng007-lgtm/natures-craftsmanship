@@ -2,12 +2,21 @@ const MESSAGE_KEY = "linyuanzhe.messages";
 const SESSIONS_KEY = "linyuanzhe.sessions";
 const ACTIVE_SESSION_KEY = "linyuanzhe.activeSessionId";
 
+export const DEFAULT_SOUL_PROMPT = [
+  "你是临渊者，天工造物的基础工作 Soul。",
+  "默认姿态：先理解目标，再主动补齐必要上下文，优先核实真实运行和文件状态；能动手就动手，能验证就验证。",
+  "工作方式：拆解任务、选择最小有效工具、持续收口；遇到错误先诊断根因并重试一次，避免空泛解释。",
+  "交付标准：回答简洁清楚，说明已做什么、结果、验证与未完成风险；不编造工具结果，不隐藏失败。",
+  "边界：用户目标、安全策略、A5 硬拦和工作区权限优先于任何表达风格。"
+].join("\n");
+
 const defaultSettings = {
   workspace: "",
   mode: "auto",
+  permissionMode: "workspace_full",
   maxSteps: 20,
   personaName: "临渊者",
-  soulPrompt: "",
+  soulPrompt: DEFAULT_SOUL_PROMPT,
   personaAvatarDataUrl: "",
   userDisplayName: "",
   userCallsign: "",
@@ -23,6 +32,12 @@ const defaultSettings = {
   modelApiKey: "",
   modelThinkingEnabled: false,
   modelThinkingDepth: "",
+  modelMultimodalInput: "auto",
+  modelImageInput: "auto",
+  modelVideoInput: "auto",
+  modelAudioInput: "auto",
+  webSearchProvider: "auto",
+  imageGenerationMode: "auto",
   plannerMode: "",
   toolMode: "",
   lifecycleFreeWillFrequency: "manual",
@@ -37,7 +52,8 @@ const defaultRun = {
   stdout: "",
   stderr: "",
   workspace: "",
-  mode: "auto"
+  mode: "auto",
+  permissionMode: "workspace_full"
 };
 
 const defaultBackendConfig = {
@@ -60,6 +76,24 @@ const defaultRunProgress = {
   codexProgress: null,
   steps: []
 };
+
+function cleanSelectedSkill(skill) {
+  if (!skill || typeof skill !== "object") return null;
+  const id = String(skill.id || skill.abilityId || skill.ability_id || skill.name || "").trim();
+  const name = String(skill.name || skill.abilityName || skill.ability_name || skill.title || skill.id || "").trim();
+  if (!id && !name) return null;
+  return {
+    id: id || name,
+    name: name || id,
+    category: String(skill.category || ""),
+    description: String(skill.description || ""),
+    toolNames: Array.isArray(skill.toolNames) ? skill.toolNames.map((item) => String(item || "")).filter(Boolean).slice(0, 24) : []
+  };
+}
+
+function publicSelectedSkills(skills) {
+  return (Array.isArray(skills) ? skills : []).map((skill) => ({ ...skill }));
+}
 
 function cleanProgressStep(step) {
   const progressSnapshot = step?.progress_snapshot || step?.progressSnapshot || null;
@@ -231,6 +265,7 @@ export function createState() {
     settings: { ...defaultSettings },
     activePage: "chat",
     activeSkillCategory: "all",
+    selectedSkills: [],
     sessions: conversation.sessions,
     activeSessionId: conversation.activeSessionId,
     messages: activeSession(conversation.sessions, conversation.activeSessionId).messages,
@@ -246,6 +281,7 @@ export function createState() {
       settings: { ...data.settings },
       activePage: data.activePage,
       activeSkillCategory: data.activeSkillCategory,
+      selectedSkills: publicSelectedSkills(data.selectedSkills),
       sessions: publicSessionList(data.sessions, data.activeSessionId),
       activeSessionId: data.activeSessionId,
       messages: [...data.messages],
@@ -288,6 +324,23 @@ export function createState() {
     const next = String(category || "all").trim() || "all";
     data.activeSkillCategory = next;
     emit("skillCategory", next);
+  }
+
+  function toggleSelectedSkill(skill) {
+    const cleaned = cleanSelectedSkill(skill);
+    if (!cleaned) return publicSelectedSkills(data.selectedSkills);
+    const key = String(cleaned.id || cleaned.name).toLowerCase();
+    const exists = data.selectedSkills.some((item) => String(item.id || item.name).toLowerCase() === key);
+    data.selectedSkills = exists
+      ? data.selectedSkills.filter((item) => String(item.id || item.name).toLowerCase() !== key)
+      : [...data.selectedSkills, cleaned].slice(-5);
+    emit("selectedSkills", publicSelectedSkills(data.selectedSkills));
+    return publicSelectedSkills(data.selectedSkills);
+  }
+
+  function clearSelectedSkills() {
+    data.selectedSkills = [];
+    emit("selectedSkills", []);
   }
 
   function setBusy(next) {
@@ -364,6 +417,25 @@ export function createState() {
       ...data.runProgress,
       phase: "finished",
       ok: finalOk,
+      finishedAt: now,
+      steps
+    };
+    emit("runProgress", publicRunProgress(data.runProgress));
+  }
+
+  function interruptRunProgress(requestId, summary = "") {
+    if (!data.runProgress.requestId || String(requestId || "") !== data.runProgress.requestId) return;
+    const now = Date.now();
+    const steps = mergeProgressStep(data.runProgress.steps, cleanProgressStep({
+      id: "frontend_interrupt",
+      title: "用户中断",
+      status: "interrupted",
+      summary: summary || "进度和上下文已保留，可继续。"
+    }));
+    data.runProgress = {
+      ...data.runProgress,
+      phase: "interrupted",
+      ok: null,
       finishedAt: now,
       steps
     };
@@ -474,6 +546,8 @@ export function createState() {
     setSettings,
     setActivePage,
     setActiveSkillCategory,
+    toggleSelectedSkill,
+    clearSelectedSkills,
     setBusy,
     setLastRun,
     setRuntimeStatus,
@@ -481,6 +555,7 @@ export function createState() {
     startRunProgress,
     applyRunProgress,
     finishRunProgress,
+    interruptRunProgress,
     clearRunProgress,
     addMessage,
     clearMessages,

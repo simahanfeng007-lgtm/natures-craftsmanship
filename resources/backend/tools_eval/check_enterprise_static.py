@@ -2,6 +2,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 import re
+import sys
 
 EXPECTED_SKILLS = [
     "25_shuju_biaoge_fenxi",
@@ -96,6 +97,16 @@ EXPECTED_TOOLS = [
     "app_package_plan",
 ]
 
+
+def _runtime_schema_names(backend: Path) -> set[str]:
+    sys.path.insert(0, str(backend))
+    try:
+        from tiangong_agent_runtime.tool_schemas import GONGJU_CANSHU_SCHEMA
+    except Exception:
+        return set()
+    return set(GONGJU_CANSHU_SCHEMA.keys())
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--backend", required=True)
@@ -114,10 +125,11 @@ def main():
                     errors.append(f"bad_skill_format:{s}:{h}")
     schema_file = runtime / "tool_schemas.py"
     schema_txt = schema_file.read_text(encoding="utf-8") if schema_file.exists() else ""
+    schema_names = _runtime_schema_names(backend)
     runtime_entry = runtime / "runtime_entry.py"
     rt_txt = runtime_entry.read_text(encoding="utf-8") if runtime_entry.exists() else ""
     for t in EXPECTED_TOOLS:
-        if t not in schema_txt:
+        if (schema_names and t not in schema_names) or (not schema_names and t not in schema_txt):
             errors.append(f"missing_schema:{t}")
         if t not in rt_txt:
             errors.append(f"missing_registration:{t}")

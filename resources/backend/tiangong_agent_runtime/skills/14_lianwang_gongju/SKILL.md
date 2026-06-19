@@ -8,6 +8,7 @@
 
 - `web_search`
 - `web_readability_extract`
+- `web_download`
 - `dns_resolve`
 - `network_request`
 - `http_client`

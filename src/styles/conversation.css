@@ -409,6 +409,12 @@
   max-width: 100%;
 }
 
+.md-inline-media {
+  display: block;
+  max-width: 100%;
+  margin: 8px 0;
+}
+
 .md-media img,
 .md-media video {
   display: block;
@@ -424,6 +430,33 @@
   width: min(100%, 420px);
 }
 
+.md-media-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.md-media-actions.compact {
+  margin-top: 5px;
+}
+
+.md-media-action {
+  min-height: 28px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface-soft);
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.md-media-action:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 .md-media-caption {
   margin-top: 5px;
   color: var(--muted-2);
@@ -435,10 +468,18 @@
   display: block;
   max-width: 100%;
   max-height: 320px;
-  margin: 8px 0;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   object-fit: contain;
+  background: var(--surface-soft);
+}
+
+.message-attachment-media {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
 }
 
 .progress-header {
@@ -478,6 +519,11 @@
 .progress-state.failed {
   border-color: rgba(239, 68, 68, 0.32);
   color: #fca5a5;
+}
+
+.progress-state.interrupted {
+  border-color: rgba(245, 158, 11, 0.34);
+  color: #fbbf24;
 }
 
 .codex-progress-metrics {
@@ -567,9 +613,73 @@
   color: #fca5a5;
 }
 
+.codex-plan-step.interrupted .codex-plan-name,
+.codex-plan-step.interrupted .codex-plan-score {
+  color: #fbbf24;
+}
+
 .progress-steps {
   display: grid;
   gap: 8px;
+}
+
+.progress-steps-section {
+  display: grid;
+  gap: 8px;
+}
+
+.progress-steps-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 24px;
+  gap: 8px;
+}
+
+.progress-steps-label {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.progress-steps-toggle {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 24px;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.progress-steps-toggle:hover {
+  color: var(--accent);
+  background: transparent;
+}
+
+.progress-steps-toggle:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  outline-offset: 2px;
+}
+
+.progress-steps-toggle svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform 120ms ease;
+}
+
+.progress-steps-section.expanded .progress-steps-toggle svg {
+  transform: rotate(180deg);
 }
 
 .progress-step {
@@ -577,6 +687,16 @@
   grid-template-columns: 12px minmax(0, 1fr);
   gap: 9px;
   align-items: start;
+}
+
+.progress-step.thinking-group {
+  cursor: pointer;
+}
+
+.progress-step.thinking-group:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  outline-offset: 4px;
+  border-radius: 8px;
 }
 
 .progress-dot {
@@ -601,6 +721,10 @@
   background: #ef4444;
 }
 
+.progress-step.interrupted .progress-dot {
+  background: #f59e0b;
+}
+
 .progress-step-line {
   display: flex;
   align-items: baseline;
@@ -617,6 +741,18 @@
   color: var(--text);
 }
 
+.thinking-group-chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-left: 6px;
+  color: var(--muted-2);
+  font-size: 13px;
+  line-height: 1;
+}
+
 .progress-step-status {
   flex-shrink: 0;
   color: var(--muted-2);
@@ -629,6 +765,45 @@
   font-size: 12px;
   line-height: 1.55;
   white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.thinking-step-details {
+  display: grid;
+  gap: 7px;
+  margin-top: 8px;
+  padding-left: 10px;
+  border-left: 1px solid color-mix(in srgb, var(--accent) 24%, transparent);
+}
+
+.thinking-step-detail {
+  display: grid;
+  gap: 2px;
+}
+
+.thinking-step-detail-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.thinking-step-detail-status {
+  flex-shrink: 0;
+  color: var(--muted-2);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.thinking-step-detail-summary {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
   overflow-wrap: anywhere;
 }
 
@@ -690,6 +865,11 @@
   border-color: rgba(20, 184, 166, 0.32);
 }
 
+.attachment-chip.attached,
+.attachment-chip.selected {
+  border-color: rgba(59, 130, 246, 0.28);
+}
+
 .attachment-chip.failed {
   border-color: rgba(239, 68, 68, 0.32);
 }
@@ -746,19 +926,43 @@ button.attachment-label:hover {
 
 .composer {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: 44px minmax(0, 1fr) auto;
   gap: 10px;
-  align-items: end;
-  padding: 14px 20px 18px;
+  align-items: center;
+  padding: 12px 20px 14px;
   overflow: hidden;
   border-top: 1px solid var(--line);
   background: var(--surface);
 }
 
+.composer.is-drag-over {
+  background: color-mix(in srgb, var(--accent-soft) 38%, var(--surface));
+  box-shadow: inset 0 0 0 2px rgba(20, 184, 166, 0.36);
+}
+
+.composer.is-drag-over textarea {
+  border-color: rgba(20, 184, 166, 0.62);
+  box-shadow: 0 0 0 3px rgba(20, 184, 166, 0.14);
+}
+
 .composer-extras {
+  display: grid;
+  place-items: center;
+  min-width: 0;
+}
+
+.composer-extras .icon-button {
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius);
+}
+
+.composer-run-controls {
   display: flex;
-  gap: 4px;
-  padding-bottom: 6px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 44px;
 }
 
 textarea {
@@ -797,6 +1001,43 @@ textarea:focus {
   color: #fff;
   font-size: 18px;
   transition: all var(--transition);
+}
+
+.send-button[hidden] {
+  display: none;
+}
+
+.interrupt-button {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius);
+  border: 1px solid rgba(245, 158, 11, 0.36);
+  background: var(--warn-soft);
+  color: var(--warn);
+  transition: all var(--transition);
+}
+
+.interrupt-button:hover {
+  transform: scale(1.04);
+  border-color: rgba(245, 158, 11, 0.56);
+}
+
+.interrupt-button:disabled {
+  cursor: default;
+  opacity: 0.72;
+  transform: none;
+}
+
+.interrupt-button[hidden] {
+  display: none;
+}
+
+.interrupt-button svg {
+  width: 18px;
+  height: 18px;
 }
 
 .send-button:hover {

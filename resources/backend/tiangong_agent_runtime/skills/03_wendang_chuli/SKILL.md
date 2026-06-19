@@ -1,7 +1,17 @@
 # 文档处理
 
+## 工具
+
+- `document_parse`
+- `document_query`
+- `document_text_extract`
+- `document_rewrite_plan`
+- `document_apply_rewrite`
+- `document_export`
+- `document_rollback`
+
 ## 1. 定位
-文档处理负责所有非纯代码文件的结构化理解、内容抽取、问答、改写、导出和回滚。面向 PDF、Word、Excel、PPT、Markdown、纯文本等文档。不是简单"读文档"，而是尽量保留页码、标题层级、表格结构、批注、公式、目录等结构化信息。
+文档处理负责所有非纯代码文件的结构化理解、内容抽取、问答、改写、导出和回滚。面向 PDF、Word、Excel、PPT、Markdown、纯文本等文档。不是简单“读文档”，而是尽量保留页码、标题层级、表格结构、批注、公式、目录等结构化信息。
 
 ## 2. 触发条件
 - 用户上传文档后要求总结、分析、抽取表格、找问题

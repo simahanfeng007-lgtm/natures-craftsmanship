@@ -1,5 +1,14 @@
 # 项目打包
 
+## 工具
+
+- `scan_project`
+- `create_zip_package`
+- `create_release_bundle`
+- `build_delivery_standardization`
+- `file_sha256`
+- `return_analysis`
+
 ## 1. 定位
 项目打包不只是压缩 zip。它负责把项目从"开发目录"变成"可交付、可追踪、可回滚、可验收"的发布资产。覆盖打包范围确认、排除规则、版本命名、发布清单、文件完整性、运行时依赖检查、smoke 验证和最终交付。
 

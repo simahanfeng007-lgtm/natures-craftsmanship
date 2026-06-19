@@ -46,6 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-steps", type=int, default=20, help="单轮最多执行步骤数；默认 20。")
     parser.add_argument("--status", action="store_true", help="显示状态后退出。")
     parser.add_argument("--show-config", action="store_true", help="显示脱敏配置后退出。")
+    parser.add_argument("--memory-heartbeat", action="store_true", help="Run memory/forgetting heartbeat maintenance and exit.")
     lifecycle = parser.add_mutually_exclusive_group()
     lifecycle.add_argument("--lifecycle-confirm", metavar="ID", help="确认待确认自主更新后退出。")
     lifecycle.add_argument("--lifecycle-deny", metavar="ID", help="拒绝并移除待确认自主更新后退出。")
@@ -53,85 +54,29 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _read_jsonl(path: Any, *, limit: int = 200) -> list[dict[str, Any]]:
-    try:
-        from pathlib import Path
-        target = Path(path)
-        if not target.exists():
-            return []
-        rows: list[dict[str, Any]] = []
-        with target.open("r", encoding="utf-8") as f:
-            for raw in f:
-                line = raw.strip()
-                if not line:
-                    continue
-                try:
-                    value = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(value, dict):
-                    rows.append(value)
-                if len(rows) >= limit:
-                    break
-        return rows
-    except Exception:
-        return []
-
-
 def _learning_pool_snapshot(runtime: Any) -> dict[str, Any]:
-    pool = getattr(runtime, "jingyan_chi", None)
-    path = str(getattr(pool, "lujing", "") or "")
-    rows = _read_jsonl(path)
-    latest: list[dict[str, Any]] = []
-    counters = {
+    method = getattr(runtime, "learning_card_snapshot", None)
+    if callable(method):
+        try:
+            snapshot = method()
+            if isinstance(snapshot, dict) and snapshot.get("schema"):
+                return snapshot
+        except Exception:
+            pass
+    return {
+        "schema": "tiangong.desktop.learning_card_snapshot.v1",
+        "status": "unavailable",
+        "path": "",
+        "total": 0,
         "pending_learning": 0,
         "candidate_ready": 0,
         "learned": 0,
         "learned_no_asset": 0,
         "failed": 0,
-    }
-    for item in rows:
-        processed = bool(item.get("yichuli"))
-        result = str(item.get("xuexi_jieguo") or "")
-        skill = str(item.get("shengcheng_skill") or "")
-        tool = str(item.get("shengcheng_tool") or "")
-        failed = any(marker in result for marker in ("失败", "异常", "error", "Error", "failed"))
-        if failed:
-            status = "failed"
-            counters["failed"] += 1
-        elif not processed:
-            status = "pending_learning"
-            counters["pending_learning"] += 1
-        elif skill or tool:
-            status = "learned"
-            counters["learned"] += 1
-            counters["candidate_ready"] += 1
-        else:
-            status = "learned_no_asset"
-            counters["learned_no_asset"] += 1
-        latest.append({
-            "id": str(item.get("tiao_id") or ""),
-            "source": str(item.get("laiyuan") or ""),
-            "summary": str(item.get("zhaiyao") or "")[:500],
-            "task_preview": str(item.get("yuanshi_renwu") or "")[:300],
-            "learning_result": result[:500],
-            "status": status,
-            "can_manual_learn": status == "pending_learning",
-            "can_delete": status == "pending_learning",
-            "has_skill": bool(skill),
-            "skill_name": skill[:120],
-            "has_tool": bool(tool),
-            "tool_name": tool[:120],
-            "created_at": item.get("chuangjian_shijian"),
-        })
-    latest.sort(key=lambda row: (0 if row.get("status") == "pending_learning" else 1, -float(row.get("created_at") or 0)))
-    return {
-        "schema": "tiangong.desktop.learning_pool_snapshot.v1",
-        "status": "pending" if counters["pending_learning"] else ("synced" if rows else "empty"),
-        "path": path,
-        "total": len(rows),
-        **counters,
-        "latest": latest[:8],
+        "running": 0,
+        "discarded": 0,
+        "latest": [],
+        "error": "learning_card_snapshot_unavailable",
     }
 
 
@@ -272,24 +217,18 @@ def _handle_lifecycle_update(action: str, update_id: str) -> dict[str, Any]:
 
 def _handle_learning_delete(tiao_id: str) -> dict[str, Any]:
     try:
-        from tiangong_agent_runtime.free_will_learning_chain import JingyanChi
+        from tiangong_agent_runtime.autonomous_learning_pipeline import LearningCardStore
 
-        chi = JingyanChi()
-        result = chi.shanchu_weixuexi(tiao_id)
-        snapshot = {
-            "schema": "tiangong.desktop.learning_pool_delete_result.v1",
-            "path": str(chi.lujing),
-            **result,
-        }
+        store = LearningCardStore()
+        result = store.discard(tiao_id, reason="user_deleted")
         if result.get("ok"):
-            snapshot["message"] = "已删除未学习经验。"
-        elif result.get("error") == "already_learned":
-            snapshot["message"] = "这条经验已经学习过，不能从未学习池删除。"
-        elif result.get("error") == "not_found":
-            snapshot["message"] = "未找到这条未学习经验。"
-        else:
-            snapshot["message"] = "删除失败。"
-        return snapshot
+            return {
+                "schema": "tiangong.desktop.learning_pool_delete_result.v1",
+                "ok": True,
+                "id": tiao_id,
+                "path": str(store.root),
+                "message": "已从待学习队列删除。",
+            }
     except Exception as exc:
         return {
             "schema": "tiangong.desktop.learning_pool_delete_result.v1",
@@ -297,6 +236,14 @@ def _handle_learning_delete(tiao_id: str) -> dict[str, Any]:
             "id": tiao_id,
             "error": f"{exc.__class__.__name__}: {_public_text(exc, limit=220)}",
         }
+    return {
+        "schema": "tiangong.desktop.learning_pool_delete_result.v1",
+        "ok": False,
+        "id": tiao_id,
+        "path": str(store.root),
+        "error": "not_found",
+        "message": "未找到这张待学习卡。",
+    }
 
 
 def _status_payload(context: Any, args: Any) -> dict[str, Any]:
@@ -332,7 +279,7 @@ def _status_payload(context: Any, args: Any) -> dict[str, Any]:
         },
         "learning": {
             "status": pool.get("status", "empty"),
-            "jingyan_chi": pool,
+            "learning_cards": pool,
             "skill_queue": _snapshot_or_disabled(rt, "skill_queue_snapshot", "skill_queue"),
             "tool_requests": _snapshot_or_disabled(rt, "tool_request_snapshot", "tool_requests"),
             "experience": _snapshot_or_disabled(rt, "experience_snapshot", "experience"),
@@ -477,6 +424,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config = load_model_config(args)
         context = build_agent_context(config, workspace=args.workspace, max_steps=args.max_steps)
+        if args.memory_heartbeat:
+            method = getattr(context.runtime, "run_memory_forgetting_heartbeat", None)
+            if not callable(method):
+                write_line(json.dumps({"ok": False, "error": "memory_heartbeat_unavailable"}, ensure_ascii=False, indent=2, default=str))
+                return 2
+            write_line(json.dumps(method(), ensure_ascii=False, indent=2, default=str))
+            return 0
         if args.status:
             write_line(_status_text(context, args))
             return 0

@@ -4,6 +4,12 @@ export const modeNames = {
   work: "工作"
 };
 
+export const permissionNames = {
+  readonly: "只读",
+  workspace_write: "读写",
+  workspace_full: "完全权限"
+};
+
 const labelNames = {
   provider: "模型服务",
   model_service: "模型服务",
@@ -23,6 +29,8 @@ const labelNames = {
   signal_kind: "SignalKind",
   health_state: "HealthState",
   max_steps: "最大步数",
+  permission_mode: "权限",
+  permissionMode: "权限",
   workspace: "工作区",
   workspace_writable: "工作区可写",
   kernel_importable: "内核可导入",
@@ -99,6 +107,9 @@ const valueNames = {
   xhigh: "xhigh",
   chat: "聊天",
   work: "工作",
+  readonly: "只读",
+  workspace_write: "读写",
+  workspace_full: "完全权限",
   idle: "空闲",
   running: "运行中",
   finished: "已完成",

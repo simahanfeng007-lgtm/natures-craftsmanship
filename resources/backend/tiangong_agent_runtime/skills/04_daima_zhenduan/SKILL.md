@@ -1,5 +1,17 @@
 # 代码诊断
 
+## 工具
+
+- `scan_project`
+- `diagnose_project`
+- `read_file`
+- `run_python_quality_check`
+- `run_python_tests`
+- `tool_skill_blueprint`
+- `return_analysis`
+- `return_code`
+- `model_chat`
+
 ## 1. 定位
 代码诊断负责识别项目中的逻辑bug、语法错误、依赖错误、路径错误、打包错误、Provider调用错误、工具链错误、测试失败和架构错位。不直接修改代码，而是走"复现取证 → 定位 → 根因分类 → 修复建议 → 验证计划"的工程路线。
 

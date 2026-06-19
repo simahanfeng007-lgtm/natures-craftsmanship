@@ -3,14 +3,11 @@ import {
   formatElapsedMs,
   humanizeBackendError,
   humanizeBackendText,
+  permissionNames,
   translateValue
 } from "../core/formatters.mjs";
 
-const MODE_LABELS = {
-  auto: "自动",
-  chat: "聊天",
-  work: "工作"
-};
+const PERMISSION_LABELS = permissionNames;
 
 const VALUE_LABELS = {
   ready: "就绪",
@@ -102,9 +99,9 @@ export const executePanelPlugin = {
                 </div>
                 <div class="settings-form">
                   <label class="field-row">
-                    <span>运行模式</span>
-                    <select id="executeMode">
-                      ${Object.entries(MODE_LABELS).map(([value, label]) => option(value, label)).join("")}
+                    <span>权限</span>
+                    <select id="executePermissionMode">
+                      ${Object.entries(PERMISSION_LABELS).map(([value, label]) => option(value, label)).join("")}
                     </select>
                   </label>
                   <label class="field-row">
@@ -145,7 +142,7 @@ export const executePanelPlugin = {
     const memoryHealth = panel.querySelector("#memoryHealth");
     const memoryStatusRows = panel.querySelector("#memoryStatusRows");
     const settingsState = panel.querySelector("#executeSettingsState");
-    const modeInput = panel.querySelector("#executeMode");
+    const permissionInput = panel.querySelector("#executePermissionMode");
     const maxStepsInput = panel.querySelector("#executeMaxSteps");
     const saveSettings = panel.querySelector("#executeSaveSettings");
     const lastRunPill = panel.querySelector("#lastRunPill");
@@ -168,7 +165,7 @@ export const executePanelPlugin = {
       const data = status.payload || {};
       const coreResult = data.core_result || {};
       const learning = data.learning || {};
-      const pool = learning.jingyan_chi || {};
+      const pool = learning.learning_cards || {};
       setRows(backendStatusRows, [
         ["内核导入", data.kernel_importable === undefined ? "未知" : data.kernel_importable],
         ["工作区", concisePath(data.workspace), data.workspace],
@@ -190,7 +187,7 @@ export const executePanelPlugin = {
     }
 
     function renderSettings(settings) {
-      modeInput.value = settings.mode || "auto";
+      permissionInput.value = settings.permissionMode || "workspace_full";
       maxStepsInput.value = String(settings.maxSteps || 20);
     }
 
@@ -204,7 +201,7 @@ export const executePanelPlugin = {
       setRows(lastRunRows, [
         ["退出码", run.code === "" || run.code === undefined ? "未运行" : String(run.code)],
         ["耗时", formatElapsedMs(run.elapsedMs)],
-        ["模式", MODE_LABELS[run.mode] || run.mode || ""],
+        ["权限", PERMISSION_LABELS[run.permissionMode] || translateValue(run.permissionMode || state.snapshot().settings.permissionMode || "workspace_full")],
         ["工作区", concisePath(run.workspace), run.workspace]
       ]);
       output.textContent = backendOutput(run);
@@ -220,7 +217,8 @@ export const executePanelPlugin = {
       saveSettings.disabled = true;
       try {
         const result = await actions.hotSwitchSettings({
-          mode: modeInput.value,
+          mode: "auto",
+          permissionMode: permissionInput.value,
           maxSteps: Number(maxStepsInput.value || 20)
         }, { refreshConfig: false });
         settingsState.textContent = result.ok ? "已热切换" : "后端切换失败";
@@ -229,7 +227,7 @@ export const executePanelPlugin = {
         saveSettings.disabled = false;
       }
     });
-    for (const input of [modeInput, maxStepsInput]) {
+    for (const input of [permissionInput, maxStepsInput]) {
       input.addEventListener("change", markDirty);
       input.addEventListener("input", markDirty);
     }

@@ -9,9 +9,9 @@ import os
 import re
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from tiangong_agent_runtime.activation_protocol import ActivationForm
 
@@ -33,6 +33,17 @@ _DOCUMENT_ATTACHMENT_EXTENSIONS = {"pdf", "doc", "docx", "xls", "xlsx", "ppt", "
 _INTERNAL_NOISE = ("[计划器]", "【计划器】", "[运行链]", "【运行链】", "未生成可执行计划")
 _THINK_BLOCK_RE = re.compile(r"(?is)(?:```think(?:ing)?\s*.*?```|<think(?:ing)?\b[^>]*>.*?</think(?:ing)?>)")
 _OPEN_THINK_RE = re.compile(r"(?is)<think(?:ing)?\b[^>]*>.*$")
+_PSEUDO_TOOL_TEXT_MARKERS = (
+    "<tool_call",
+    "function_call",
+    "<function=",
+    "<function ",
+    "<||dsml",
+    "//dsml//",
+    "||dsml||",
+    "toolcalls>",
+    "invoke name=",
+)
 _INTERNAL_WORKSPACE_DIR_NAMES = {
     ".linyuanzhe",
     ".tiangong_media_context",
@@ -78,10 +89,34 @@ def _should_consider_learning(lujing: str, xiaoxi: str, jieguo: str) -> bool:
     return True
 
 
-def _chat_route_fallback(xiaoxi: str) -> str:
-    """本地 fallback 已移除。所有 chat 请求穿透到 LLM 正常生成回复。"""
-    return ""
-
+def _looks_like_active_learning_request(xiaoxi: str, skill_names: Any = None) -> bool:
+    compact = re.sub(r"\s+", "", str(xiaoxi or "").casefold())
+    if not compact:
+        return False
+    explicit_markers = (
+        "去学",
+        "你去学",
+        "帮我学",
+        "帮我学习",
+        "学一下",
+        "学习一下",
+        "主动学习",
+        "研究一下",
+        "调研一下",
+        "掌握一下",
+        "学会",
+        "补课",
+        "生成学习卡",
+        "创建学习卡",
+        "新增学习卡",
+    )
+    if any(marker in compact for marker in explicit_markers):
+        return True
+    learning_skill_names = {"学习资产管理", "现场学习资产化"}
+    selected = set(_coerce_skill_names(skill_names))
+    if selected & learning_skill_names:
+        return bool(re.search(r"(学习|研究|调研|掌握)(一下|下|一遍|这个|这套|关于|如何|怎么|[:：])", compact))
+    return False
 
 def _model_connection_failed_message(exc: ModelClientError) -> str:
     message = str(getattr(exc, "user_message", "") or exc).strip()
@@ -94,7 +129,7 @@ def _looks_like_code_analysis_request(text: str) -> bool:
     compact = re.sub(r"\s+", "", str(text or "").casefold())
     if not compact:
         return False
-    action_markers = ("分析", "看看", "看下", "看一下", "梳理", "审查", "了解", "读一下")
+    action_markers = ("分析", "看看", "看下", "看一下", "梳理", "审查", "了解", "读一下", "修复", "修一下", "改一下", "排查", "诊断")
     code_scope_markers = ("代码", "源码", "项目", "工程", "逻辑", "架构", "模块", "入口", "调用链", "天工造物v1")
     return any(marker in compact for marker in action_markers) and any(marker in compact for marker in code_scope_markers)
 
@@ -115,6 +150,137 @@ def _looks_like_web_search_request(text: str) -> bool:
         "websearch", "web_search", "search", "google", "bing", "news", "latest", "today", "current",
     )
     return any(marker in compact for marker in direct_markers)
+
+
+def _looks_like_web_download_request(text: str) -> bool:
+    raw = str(text or "")
+    compact = re.sub(r"\s+", "", raw.casefold())
+    if not compact:
+        return False
+    download_markers = ("下载", "下下来", "保存网页", "保存到", "下载附件", "download", "saveurl", "savefile")
+    web_markers = ("http://", "https://", "网页", "网址", "链接", "url", "web")
+    return any(marker in compact for marker in download_markers) and any(marker in compact for marker in web_markers)
+
+
+def _looks_like_fixed_work_request(text: str) -> bool:
+    raw = str(text or "")
+    compact = re.sub(r"\s+", "", raw.casefold())
+    if not compact:
+        return False
+    work_markers = (
+        "来修", "修复", "修一下", "改一下", "改掉", "处理", "开始干活", "干活", "工作啊", "工作",
+        "继续", "别停", "不要停", "执行", "运行", "测试", "扫描", "读取", "写入", "保存",
+        "下载", "上网", "搜索", "学习", "安装", "打包", "排查", "诊断", "审查", "迁移",
+        "fix", "repair", "work", "continue", "run", "test", "scan", "read", "write",
+        "download", "search", "learn", "install", "package", "diagnose",
+    )
+    object_markers = (
+        "文件", "目录", "工作区", "项目", "工程", "代码", "网页", "链接", "url", "github", "仓库",
+        "file", "folder", "workspace", "project", "repo", "code", "web", "link",
+    )
+    if any(marker in compact for marker in work_markers):
+        return True
+    return any(marker in compact for marker in object_markers) and any(marker in raw for marker in ("http://", "https://"))
+
+
+def _looks_like_file_task_request(text: str) -> bool:
+    raw = str(text or "")
+    compact = re.sub(r"\s+", "", raw.casefold())
+    if not compact:
+        return False
+    explicit_code_markers = (
+        "code-x", "codex", "代码系统", "代码诊断", "修复代码", "改代码", "写代码",
+        "源码", "仓库", "repo", "bug", "traceback", ".py", ".js", ".ts",
+    )
+    desktop_file_phrases = (
+        "整理桌面", "清理桌面", "收拾桌面", "桌面太乱", "桌面文件",
+        "desktopfiles", "organizedesktop", "cleandesktop",
+    )
+    if any(marker in compact for marker in explicit_code_markers) and not any(phrase in compact for phrase in desktop_file_phrases):
+        return False
+    action_markers = (
+        "整理", "清理", "收拾", "归类", "分类", "移动", "复制", "删除", "重命名",
+        "查看", "列出", "读取", "写入", "保存", "解析", "找文件", "找一下",
+        "organize", "clean", "sort", "move", "copy", "delete", "rename", "list", "read",
+    )
+    target_markers = (
+        "桌面", "文件", "目录", "文件夹", "资料", "文档", "下载", "路径",
+        "desktop", "file", "folder", "directory", "downloads", "documents",
+    )
+    return any(marker in compact for marker in action_markers) and any(marker in compact for marker in target_markers)
+
+
+def _looks_like_desktop_file_task(text: str) -> bool:
+    compact = re.sub(r"\s+", "", str(text or "").casefold())
+    return ("桌面" in compact or "desktop" in compact) and _looks_like_file_task_request(text)
+
+
+def _windows_desktop_path() -> Path | None:
+    candidates: list[Path] = []
+    for env_name in ("USERPROFILE", "OneDrive", "OneDriveConsumer", "OneDriveCommercial"):
+        value = os.getenv(env_name)
+        if value:
+            candidates.append(Path(value) / "Desktop")
+    candidates.append(Path.home() / "Desktop")
+    for candidate in candidates:
+        try:
+            resolved = candidate.expanduser().resolve()
+            if resolved.exists() and resolved.is_dir():
+                return resolved
+        except OSError:
+            continue
+    return None
+
+
+def _file_task_workspace_override(context: AgentShellContext, message: str) -> Path | None:
+    if _looks_like_desktop_file_task(message):
+        return _windows_desktop_path()
+    return None
+
+
+def _sanitize_routed_skill_names(user_text: str, skills: Any) -> list[str]:
+    names = _coerce_skill_names(skills)
+    if _looks_like_file_task_request(user_text) and not _looks_like_explicit_codex_request(user_text):
+        names = [name for name in names if name != "Code-X 代码系统"]
+    return names
+
+
+def _file_task_skill_names(skills: Any, *, default_to_file_ops: bool = True) -> list[str]:
+    names = [name for name in _coerce_skill_names(skills) if name != "Code-X 代码系统"]
+    return names or (["文件操作"] if default_to_file_ops else [])
+
+
+def _is_code_execution_request(text: str) -> bool:
+    return _looks_like_explicit_codex_request(text) or _looks_like_code_analysis_request(text)
+
+
+def _should_execute_file_branch(text: str, skills: Any) -> bool:
+    names = _coerce_skill_names(skills)
+    file_branch_skills = {
+        "文件操作",
+        "文件管理",
+        "文档处理",
+        "WPS 排版与全格式制作",
+        "办公套件",
+        "数据表格分析",
+    }
+    has_file_skill = any(name in file_branch_skills for name in names)
+    if has_file_skill and "Code-X 代码系统" not in names:
+        return True
+    if _is_code_execution_request(text):
+        return False
+    if _looks_like_file_task_request(text):
+        return has_file_skill
+    return False
+
+
+def _strip_codex_from_non_code_work(text: str, skills: Any) -> list[str]:
+    names = _coerce_skill_names(skills)
+    if "Code-X 代码系统" not in names:
+        return names
+    if _is_code_execution_request(text):
+        return names
+    return [name for name in names if name != "Code-X 代码系统"]
 
 
 def _looks_like_project_closure_quality_request(message: str) -> bool:
@@ -139,6 +305,9 @@ def _task_workspace_from_message(context: AgentShellContext, message: str) -> Pa
         base = base.expanduser().resolve()
     except OSError:
         return base
+    override = _file_task_workspace_override(context, message)
+    if override is not None:
+        return override
     text = str(message or "")
     compact_text = re.sub(r"\s+", "", text.casefold())
     candidates: list[tuple[int, Path]] = []
@@ -173,6 +342,44 @@ def _workspace_relative_arg(context: AgentShellContext, target: Path) -> str:
         return str(target)
 
 
+def _canonical_runtime_tool_name(tool_name: str) -> str:
+    key = re.sub(r"[\s\-.]+", "_", str(tool_name or "").strip()).casefold()
+    compact = re.sub(r"[^0-9a-zA-Z_]", "", key).casefold()
+    aliases = {
+        "list": "list_dir",
+        "ls": "list_dir",
+        "dir": "list_dir",
+        "listdir": "list_dir",
+        "list_dir": "list_dir",
+        "read": "read_file",
+        "readfile": "read_file",
+        "read_file": "read_file",
+        "write": "write_workspace_file",
+        "writefile": "write_workspace_file",
+        "write_file": "write_workspace_file",
+        "writeworkspacefile": "write_workspace_file",
+        "write_workspace_file": "write_workspace_file",
+        "runpythontests": "run_python_tests",
+        "run_python_tests": "run_python_tests",
+        "pytest": "run_python_tests",
+        "python_tests": "run_python_tests",
+        "runpythonqualitycheck": "run_python_quality_check",
+        "run_python_quality_check": "run_python_quality_check",
+        "python_quality_runner": "run_python_quality_check",
+        "compileall": "run_python_quality_check",
+        "websearch": "web_search",
+        "web_search": "web_search",
+        "webreadabilityextract": "web_readability_extract",
+        "web_readability_extract": "web_readability_extract",
+        "webdownload": "web_download",
+        "web_download": "web_download",
+        "download_url": "web_download",
+        "saveurl": "web_download",
+        "savefile": "web_download",
+    }
+    return aliases.get(key) or aliases.get(compact) or key
+
+
 def _normalize_runtime_tool_call(
     context: AgentShellContext,
     tool_name: str,
@@ -181,13 +388,16 @@ def _normalize_runtime_tool_call(
 ) -> tuple[str, dict[str, Any]]:
     name = str(tool_name or "").strip()
     args = dict(arguments or {})
+    canonical = _canonical_runtime_tool_name(name)
     try:
+        if canonical and context.runtime.registry.get(canonical) is not None:
+            return canonical, _normalize_registered_tool_args(canonical, args, user_text)
         if name and context.runtime.registry.get(name) is not None:
             return name, _normalize_registered_tool_args(name, args, user_text)
     except Exception:
         pass
 
-    alias = name.casefold().replace("-", "_").replace(".", "_")
+    alias = canonical or name.casefold().replace("-", "_").replace(".", "_")
     if alias in {"generate_plan", "create_plan", "make_plan", "plan_task"}:
         query = str(args.get("query") or args.get("task") or args.get("content") or user_text or "")
         combined = f"{user_text}\n{query}"
@@ -214,6 +424,40 @@ def _normalize_registered_tool_args(tool_name: str, args: dict[str, Any], user_t
     """Repair common LLM argument slips for registered tools without changing tool choice."""
     name = str(tool_name or "").strip().casefold().replace("-", "_").replace(" ", "")
     out = dict(args or {})
+    if name in {"list", "ls", "dir", "listdir", "list_dir"}:
+        path = str(out.get("path") or out.get("dir_path") or out.get("directory") or out.get("folder") or out.get("target") or "").strip()
+        out["path"] = path if path and path.lower() not in {"true", "false", "none", "null"} else "."
+        return out
+    if name in {"read", "readfile", "read_file"}:
+        path = str(out.get("path") or out.get("file") or out.get("filename") or out.get("target") or out.get("source") or "").strip()
+        if path:
+            out["path"] = path
+        return out
+    if name in {"runpythontests", "run_python_tests", "pytest", "python_tests"}:
+        target = str(out.get("target") or out.get("path") or out.get("file") or out.get("filename") or out.get("source") or "").strip()
+        if target:
+            out["target"] = target
+        timeout = out.get("timeout") or out.get("timeout_sec") or out.get("seconds")
+        if timeout not in (None, ""):
+            try:
+                out["timeout"] = max(5, min(300, int(float(timeout))))
+            except (TypeError, ValueError):
+                pass
+        return out
+    if name in {"runpythonqualitycheck", "run_python_quality_check", "python_quality_runner", "compileall"}:
+        target = str(out.get("target") or out.get("path") or out.get("file") or out.get("filename") or out.get("source") or "").strip()
+        if target:
+            out["target"] = target
+        command = str(out.get("command") or out.get("command_type") or out.get("cmd") or "").strip().lower()
+        if command:
+            out["command"] = command
+        timeout = out.get("timeout") or out.get("timeout_sec") or out.get("seconds")
+        if timeout not in (None, ""):
+            try:
+                out["timeout"] = max(5, min(300, int(float(timeout))))
+            except (TypeError, ValueError):
+                pass
+        return out
     if name in {"websearch", "web_search", "联网搜索", "网页检索"}:
         query = str(out.get("query") or out.get("chaxun") or out.get("q") or out.get("keyword") or "").strip()
         if not query:
@@ -231,6 +475,21 @@ def _normalize_registered_tool_args(tool_name: str, args: dict[str, Any], user_t
             url = _first_url_from_text(user_text)
         if url:
             out["url"] = url
+        return out
+    if name in {"webdownload", "web_download", "网页下载"}:
+        url = str(out.get("url") or out.get("href") or out.get("link") or "").strip()
+        if not url:
+            for key in ("query", "text", "content", "source"):
+                url = _first_url_from_text(str(out.get(key) or ""))
+                if url:
+                    break
+        if not url:
+            url = _first_url_from_text(user_text)
+        if url:
+            out["url"] = url
+        target = str(out.get("target") or out.get("path") or out.get("filename") or out.get("output") or "").strip()
+        if target:
+            out["target"] = target
         return out
     return out
 
@@ -276,13 +535,93 @@ def _stream_step(step_id: str, title: str, status: str, summary: str = "", **ext
     write_stream_event("step", step_id, title, status, summary, **extra)
 
 
+def _stream_step_id(prefix: str, tool_name: str, index: int | None = None) -> str:
+    safe = re.sub(r"[^0-9A-Za-z_]+", "_", str(tool_name or "tool")).strip("_") or "tool"
+    if index is None:
+        return f"{prefix}_{safe}"
+    return f"{prefix}_{index}_{safe}"
+
+
+def _tool_target_hint(arguments: Mapping[str, Any] | None, *, limit: int = 180) -> str:
+    args = dict(arguments or {})
+    keys = (
+        "path", "dir_path", "directory", "file_path", "filename", "target", "source",
+        "destination", "url", "href", "link", "query", "command", "output_path",
+        "output_name", "archive_name", "package_name",
+    )
+    for key in keys:
+        value = args.get(key)
+        if value in (None, "", True, False):
+            continue
+        if isinstance(value, (dict, list, tuple)):
+            continue
+        clean = _prompt_safe_text(value, limit=limit)
+        if clean:
+            return f"目标：{clean}"
+    return ""
+
+
+def _tool_step_intent(
+    tool_name: str,
+    arguments: Mapping[str, Any] | None = None,
+    *,
+    user_text: str = "",
+    reason: str = "",
+) -> tuple[str, str]:
+    name = _canonical_runtime_tool_name(tool_name)
+    action_map = {
+        "list_dir": ("查看目录", "先查看目标目录结构，确认有哪些文件和下一步可操作范围。"),
+        "scan_project": ("扫描项目", "先扫描项目结构和关键文件，建立后续诊断与修改的依据。"),
+        "diagnose_project": ("诊断项目", "根据项目结构做一次工程诊断，找出风险点、缺口和可验证问题。"),
+        "read_file": ("读取文件", "先读取目标文件内容，确认真实内容后再判断下一步。"),
+        "file_sha256": ("校验文件", "计算文件校验值，用来确认产物或文件内容的一致性。"),
+        "write_workspace_file": ("写入文件", "准备在工作区内写入或更新文件，并保持受治理的路径边界。"),
+        "make_dir": ("创建目录", "准备在工作区内创建目录，为后续文件整理或产物输出做准备。"),
+        "copy_path": ("复制路径", "准备复制工作区内的文件或目录，保留原始内容作为来源。"),
+        "move_path": ("移动路径", "准备移动或重命名工作区内的文件或目录，确保目标位置正确。"),
+        "delete_path": ("删除路径", "准备执行受治理删除，只处理允许范围内的目标。"),
+        "run_python_quality_check": ("运行质量检查", "准备运行语法检查或测试命令，用真实结果验证工程状态。"),
+        "run_python_tests": ("运行测试", "准备执行测试，确认代码行为是否符合预期。"),
+        "web_search": ("联网搜索", "准备联网检索资料，收集可复核来源和关键证据。"),
+        "web_readability_extract": ("提取网页正文", "准备读取网页正文并清洗内容，方便后续总结和交叉验证。"),
+        "web_download": ("网页下载", "准备从网页下载文件到当前工作区，并检查保存路径和下载边界。"),
+        "network_request": ("网络请求", "准备发起受治理网络请求，读取接口或网页返回结果。"),
+        "http_client": ("HTTP 请求", "准备按指定方法访问目标 URL，并返回可审计响应摘要。"),
+        "protocol_adapter": ("协议适配", "准备把 URL 或 cURL 等输入归一成可执行的 HTTP 请求。"),
+        "document_parse": ("解析文档", "准备解析文档内容，提取后续分析需要的结构化上下文。"),
+        "document_query": ("查询文档", "准备在已解析文档中查找相关内容。"),
+        "document_export": ("导出文档", "准备把处理后的文档内容导出为工作区产物。"),
+        "document_rewrite_plan": ("规划文档改写", "准备生成文档改写方案，先规划再执行。"),
+        "document_apply_rewrite": ("应用文档改写", "准备按已确认方案修改文档，并保留治理记录。"),
+        "create_zip_package": ("创建压缩包", "准备打包交付文件，并记录产物路径与校验信息。"),
+        "create_release_bundle": ("创建交付包", "准备生成可交付发布包，并附带质量与清单证据。"),
+        "evaluate_quality_gate": ("质量裁决", "准备汇总验证证据，判断当前任务是否达到交付标准。"),
+        "return_analysis": ("整理分析", "准备把已有观察整理成用户可读的分析结论。"),
+        "return_code": ("整理代码", "准备返回代码内容或补丁建议，不直接执行副作用。"),
+    }
+    title, summary = action_map.get(name, ("执行工具步骤", "准备调用受治理工具完成当前步骤。"))
+    target = _tool_target_hint(arguments)
+    if target:
+        summary = f"{summary}{target}。"
+    clean_reason = _prompt_safe_text(reason, limit=140)
+    if clean_reason and clean_reason not in {"tool_call", "project_closure_quality"}:
+        summary = f"{summary} 目的：{clean_reason}。"
+    return title, summary
+
+
 def _provider_not_configured_message() -> str:
     return "尚未配置模型接口。请进入【设置】页填写服务地址、模型名与 API Key，保存后即可进入真实模型链路。"
 
 
-def _looks_like_text_tool_call(content: str) -> bool:
+def _contains_pseudo_tool_protocol(content: str) -> bool:
     text = _strip_think_blocks(str(content or "")).lstrip().casefold()
-    return text.startswith("<tool_call") and "<function" in text
+    if not text:
+        return False
+    return any(marker in text[:1200] for marker in _PSEUDO_TOOL_TEXT_MARKERS)
+
+
+def _looks_like_text_tool_call(content: str) -> bool:
+    return _contains_pseudo_tool_protocol(content)
 
 
 def _strip_noise(content: str) -> str:
@@ -312,7 +651,7 @@ def _is_bad_final_answer(content: str) -> bool:
     if text in bad_exact:
         return True
     lowered = text.lower()
-    return lowered.startswith("<tool_call") or "<function=" in lowered[:300]
+    return _contains_pseudo_tool_protocol(lowered) or lowered.startswith("<tool_call") or "<function=" in lowered[:300]
 
 
 def _limit_visible_text(text: str, *, max_chars: int = 12000) -> str:
@@ -378,7 +717,7 @@ def _force_finalize_tool_answer(
         "role": "user",
         "content": (
             "工具已经执行完毕。现在进入最终回答阶段：\n"
-            "1. 不要再调用工具，不要输出 <tool_call>、function_call、JSON 工具指令或内部占位。\n"
+            "1. 不要再调用工具，不要输出 DSML、<tool_call>、function_call、invoke/parameter 标签、JSON 工具指令或内部占位。\n"
             "2. 如果上一轮工具选择、参数或回答格式有问题，请你自行根据工具结果纠错。\n"
             "3. 直接给用户可读的最终答案；如果工具结果不足，明确说明证据不足和下一步。\n\n"
             "最近工具结果：\n"
@@ -389,7 +728,7 @@ def _force_finalize_tool_answer(
     final_system["content"] = (
         str(final_system.get("content") or "")
         + "\n\n【最终回答硬约束】工具已关闭；必须输出自然语言最终答案。"
-        + "禁止输出工具调用标签、函数调用 JSON、内部状态占位。"
+        + "禁止输出 DSML、工具调用标签、函数调用 JSON、invoke/parameter 标签、内部状态占位。"
         + "若发现自己刚才只给了工具调用或半成品，自动修正并用工具结果回答用户。"
     )
     env = seal_compiled_messages(
@@ -409,7 +748,7 @@ def _repair_visible_final_answer(context: AgentShellContext, xiaoxi: str, bad_an
     """One-shot repair for empty/internal/tool-call final outputs."""
     system = (
         "你是天工造物的最终答案修复器。上一轮输出没有形成用户可读答案。"
-        "请不要调用工具，不要输出内部状态、工具调用标签或函数调用 JSON。"
+        "请不要调用工具，不要输出内部状态、DSML、工具调用标签、invoke/parameter 标签或函数调用 JSON。"
         "你必须根据用户问题、已有上下文和上一轮异常输出，直接给出尽可能正确的最终答案；"
         "如果证据不足，就明确说明证据不足和下一步，而不是输出占位。"
     )
@@ -1042,6 +1381,145 @@ def _l1_jiyi_pipei(rt: Any, xiaoxi: str, *, limit: int = 3) -> list[str]:
     return matches
 
 
+def _memory_recall_calibration(context: AgentShellContext, xiaoxi: str) -> dict[str, Any]:
+    """Independent LLM pass: decide whether and how this turn should query memory."""
+    fallback = {
+        "should_recall": True,
+        "query": _prompt_safe_text(xiaoxi, limit=600),
+        "focus": [],
+        "avoid": [],
+        "confidence": 0.45,
+        "reason": "fallback_to_current_user_message",
+        "source": "fallback",
+    }
+    system = context.session.messages[0].get("content", "") if context.session.messages else ""
+    user = f"""你是天工造物本轮记忆召回校准模型。
+位置：用户输入之后，系统提示词和 Soul 已经最早注入；现在只为记忆召回链生成查询意图。
+边界：
+- 你不是主线路模型的工具，不能执行任务，不能回答用户。
+- 你只决定本轮是否需要查记忆，以及用什么查询去查。
+- 当前用户消息优先于旧记忆；如果可能冲突，必须标记 avoid 或 reason。
+- 不要编造记忆内容。
+
+当前用户消息：
+{_prompt_safe_text(xiaoxi, limit=1200)}
+
+只输出 JSON：
+{{
+  "should_recall": true,
+  "query": "用于召回记忆的短查询",
+  "focus": ["要优先查找的方向"],
+  "avoid": ["本轮不应使用或可能过时的记忆方向"],
+  "confidence": 0.0,
+  "reason": "一句话说明"
+}}"""
+    try:
+        raw = _qingliang_llm(context, system, user)
+    except Exception as exc:  # noqa: BLE001
+        fallback["error"] = f"{type(exc).__name__}: {exc}"
+        return fallback
+    data = _json_object_from_model_text(raw)
+    if not data:
+        fallback["raw"] = _prompt_safe_text(raw, limit=300)
+        return fallback
+    should_raw = data.get("should_recall", True)
+    if isinstance(should_raw, str):
+        should = should_raw.strip().lower() not in {"0", "false", "no", "none", "skip", "不要", "不需要"}
+    else:
+        should = bool(should_raw)
+    query = _prompt_safe_text(data.get("query") or xiaoxi, limit=600)
+    if not query:
+        query = _prompt_safe_text(xiaoxi, limit=600)
+    def _list_text(value: Any, *, limit: int = 6) -> list[str]:
+        if isinstance(value, list):
+            raw_items = value[:limit]
+        else:
+            raw_items = [value] if value else []
+        return [_prompt_safe_text(item, limit=160) for item in raw_items if _prompt_safe_text(item, limit=160)]
+    try:
+        confidence = float(data.get("confidence", 0.65))
+    except (TypeError, ValueError):
+        confidence = 0.65
+    confidence = max(0.0, min(1.0, confidence))
+    return {
+        "should_recall": should,
+        "query": query,
+        "focus": _list_text(data.get("focus")),
+        "avoid": _list_text(data.get("avoid")),
+        "confidence": confidence,
+        "reason": _prompt_safe_text(data.get("reason"), limit=260),
+        "source": "llm_memory_calibration",
+    }
+
+
+def _memory_calibration_event_card(calibration: dict[str, Any]) -> str:
+    lines = [
+        "[MemoryCalibrationEvent / 记忆召回校准模型]",
+        "position=after Kernel+Soul; before memory recall; independent_llm_call=true; no_task_execution=true.",
+        f"should_recall={bool(calibration.get('should_recall', True))}; confidence={calibration.get('confidence', 0.0)}; source={_prompt_safe_text(calibration.get('source'), limit=80)}",
+        f"query={_prompt_safe_text(calibration.get('query'), limit=420)}",
+    ]
+    focus = calibration.get("focus") if isinstance(calibration.get("focus"), list) else []
+    avoid = calibration.get("avoid") if isinstance(calibration.get("avoid"), list) else []
+    if focus:
+        lines.append("focus=" + " | ".join(_prompt_safe_text(item, limit=120) for item in focus[:6]))
+    if avoid:
+        lines.append("avoid=" + " | ".join(_prompt_safe_text(item, limit=120) for item in avoid[:6]))
+    if calibration.get("reason"):
+        lines.append(f"reason={_prompt_safe_text(calibration.get('reason'), limit=260)}")
+    if calibration.get("error"):
+        lines.append(f"fallback_error={_prompt_safe_text(calibration.get('error'), limit=260)}")
+    return "\n".join(lines)
+
+
+def _jiyi_zhaohui_lian(context: AgentShellContext, xiaoxi: str) -> dict[str, Any]:
+    """Memory chain: Kernel+Soul -> calibration LLM -> recall -> injectable memory card."""
+    rt = context.runtime
+    calibration = _memory_recall_calibration(context, xiaoxi)
+    calibration_card = _memory_calibration_event_card(calibration)
+    items: list[str] = []
+    route = None
+    recall_query = _prompt_safe_text(calibration.get("query") or xiaoxi, limit=600)
+    if calibration.get("should_recall", True):
+        try:
+            route = rt._run_memory_recall(recall_query)
+        except Exception:
+            route = None
+        if route is not None:
+            for hint in getattr(route, "hints", ())[:3]:
+                summary = getattr(hint, "sanitized_summary", "") or ""
+                memory_id = getattr(hint, "memory_id", "") or ""
+                if summary:
+                    items.append(summary[:220])
+                if memory_id:
+                    try:
+                        rt._memory_store.record_use_feedback(memory_id, used_successfully=True)
+                    except Exception:
+                        pass
+        try:
+            items = _l1_jiyi_pipei(rt, recall_query) + items
+        except Exception:
+            pass
+        try:
+            all_levels = rt._du_jiyi_wenjian(recall_query)
+            for level in ("l5", "l4", "l3", "l2"):
+                for item in all_levels.get(level, [])[:1]:
+                    items.append(f"[L{level[1]}] {item['neirong'][:180]}")
+        except Exception:
+            pass
+    items = [item for item in dict.fromkeys(_prompt_safe_text(value, limit=360) for value in items) if item]
+    if not items and route is not None and getattr(route, "planner_hint", ""):
+        items.append(str(route.planner_hint)[:500])
+    return {
+        "calibration": calibration,
+        "calibration_card": calibration_card,
+        "route": route,
+        "items": items,
+        "query": recall_query,
+        "summary": "；".join(items),
+    }
+
+
 def _jiyi_pipei_shijian_ka(jiyi_liebiao: list[str], *, xiaoxi: str) -> str:
     if not jiyi_liebiao:
         return ""
@@ -1097,6 +1575,18 @@ def _shouji_xinxi(context: AgentShellContext, xiaoxi: str) -> dict[str, Any]:
     jieguo: dict[str, Any] = {"jiyi": "", "qinggan": "", "shangxiawen": ""}
     xiaoxi_jiaodui = _jiaodui_qian_duan_xiaoxi(xiaoxi)
     jieguo["xiaoxi_jiaodui"] = xiaoxi_jiaodui
+    # 固定链路第一步：用户输入后立刻刷新 Kernel/System + Soul 底座。
+    # 这一版不带旧器官信号，供后续“记忆校准模型”独立调用时使用。
+    _shuaxin_tishi_ci(
+        context,
+        xiaoxi_jiaodui,
+        "ordinary_chat",
+        conversation_window_cards=[],
+        prompt_event_cards=[],
+        emotion_total_cards=[],
+        runtime_material_cards=[],
+        include_base_organ_signal_cards=False,
+    )
     zuijin_duihua_ka = _zuijin_shitiao_duihua_ka(context, limit=10)
     xiaoxi_xiaodui_ka = (
         "[FrontendMessageCheck / 当前用户消息校对]\n"
@@ -1105,40 +1595,11 @@ def _shouji_xinxi(context: AgentShellContext, xiaoxi: str) -> dict[str, Any]:
         f"checked_preview={_prompt_safe_text(xiaoxi_jiaodui, limit=360)}"
     )
 
-    # 记忆召回 + L1-L5 核对匹配
-    suipian: list[str] = []
-    luxian = None
-    try:
-        luxian = rt._run_memory_recall(xiaoxi_jiaodui)
-    except Exception:
-        luxian = None
-    if luxian is not None:
-        for t in getattr(luxian, 'hints', ())[:3]:
-            zhaiyao = getattr(t, 'sanitized_summary', '') or ''
-            mid = getattr(t, 'memory_id', '') or ''
-            if zhaiyao:
-                suipian.append(zhaiyao[:220])
-            # 记录检索反馈：涨 reuse_count
-            if mid:
-                try:
-                    rt._memory_store.record_use_feedback(mid, used_successfully=True)
-                except Exception:
-                    pass
-    try:
-        suipian = _l1_jiyi_pipei(rt, xiaoxi_jiaodui) + suipian
-    except Exception:
-        pass
-    try:
-        quanbu = rt._du_jiyi_wenjian(xiaoxi_jiaodui)
-        for cengji in ("l5", "l4", "l3", "l2"):
-            for t in quanbu.get(cengji, [])[:1]:
-                suipian.append(f"[L{cengji[1]}] {t['neirong'][:180]}")
-    except Exception:
-        pass
-    if suipian:
-        jieguo["jiyi"] = "；".join(suipian)
-    elif luxian is not None and getattr(luxian, 'planner_hint', ''):
-        jieguo["jiyi"] = str(luxian.planner_hint)[:500]
+    # 记忆召回链：先独立调用记忆校准模型，再按校准查询召回相关记忆。
+    jiyi_lian = _jiyi_zhaohui_lian(context, xiaoxi_jiaodui)
+    jieguo["memory_calibration"] = jiyi_lian.get("calibration", {})
+    jieguo["jiyi_liebiao"] = list(jiyi_lian.get("items") or [])
+    jieguo["jiyi"] = str(jiyi_lian.get("summary") or "")
 
     # 情感状态
     try:
@@ -1168,25 +1629,22 @@ def _shouji_xinxi(context: AgentShellContext, xiaoxi: str) -> dict[str, Any]:
     except Exception:
         pass
 
-    # 记忆拆分为独立片段，供②命中判定逐条打分
-    jiyi_liebiao = []
-    if jieguo.get("jiyi"):
-        for pian in jieguo["jiyi"].split("；"):
-            pian = pian.strip()
-            if pian:
-                jiyi_liebiao.append(pian)
-    jieguo["jiyi_liebiao"] = jiyi_liebiao
+    # 记忆链输出已经是独立片段，禁止在后续分支重复拆分或重复注入。
+    jiyi_liebiao = list(jieguo.get("jiyi_liebiao") or [])
     jiyi_shijian_ka = _jiyi_pipei_shijian_ka(jiyi_liebiao, xiaoxi=xiaoxi_jiaodui)
     qinggan_zongzhi_ka = _qinggan_zongzhi_ka(rt)
 
-    # ① 内完成提示词拼接：Kernel/Soul 由 PromptCompiler 先放；
-    # 然后插入最近10条聊天、消息校对/L1-L5匹配事件卡、总情感值卡，再接其他系统卡。
+    # 固定链路最终编译：底座之后接记忆召回链、最近10轮对话卡、情志系统系数卡。
     _shuaxin_tishi_ci(
         context,
         xiaoxi_jiaodui,
         "ordinary_chat",
         conversation_window_cards=[zuijin_duihua_ka],
-        prompt_event_cards=[card for card in (xiaoxi_xiaodui_ka, jiyi_shijian_ka) if card],
+        prompt_event_cards=[
+            card
+            for card in (xiaoxi_xiaodui_ka, jiyi_lian.get("calibration_card", ""), jiyi_shijian_ka)
+            if card
+        ],
         emotion_total_cards=[qinggan_zongzhi_ka] if qinggan_zongzhi_ka else [],
         runtime_material_cards=[],
     )
@@ -1206,7 +1664,7 @@ _WUXIANG_SOUL = """[人格：无相]
 _CODEX_CONTINUE_MARKERS = ("继续", "接着", "往下", "继续做", "接着做", "继续跑", "继续生成", "接着写")
 
 _CODEX_RESUME_STATE_REL = Path(".linyuanzhe") / "codex_resume_state.json"
-_CODEX_ACTIVE_STATUSES = {"running", "incomplete", "failed", "partial", "partial_with_resume", "timeout", "interrupted"}
+_CODEX_ACTIVE_STATUSES = {"running", "incomplete", "failed", "partial", "partial_with_resume", "timeout", "interrupted", "blocked", "waiting_for_user", "external_error"}
 _CODEX_SNAPSHOT_EXTENSIONS = {
     ".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".html", ".css", ".json",
     ".md", ".txt", ".yml", ".yaml", ".toml", ".bat", ".ps1", ".vue", ".svelte",
@@ -1616,6 +2074,78 @@ def _codex_workspace_snapshot(context: AgentShellContext, task: str, *, limit: i
     return "\n".join(line for _, line in rows)
 
 
+def _codex_json_obj_from_text(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        return {}
+    text = value.strip()
+    if not text:
+        return {}
+    try:
+        parsed = json.loads(text)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        pass
+    match = re.search(r"\{.*\}", text, flags=re.S)
+    if not match:
+        return {}
+    try:
+        parsed = json.loads(match.group(0))
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _codex_first_plan_value(*values: Any) -> Any:
+    for value in values:
+        if isinstance(value, str):
+            if value.strip():
+                return value
+        elif isinstance(value, (dict, list)):
+            if value:
+                return value
+        elif value not in (None, ""):
+            return value
+    return ""
+
+
+def _codex_initial_plans_from_state(state: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(state, dict):
+        return {}
+    plans = state.get("plans") if isinstance(state.get("plans"), dict) else {}
+    fragments = state.get("plan_fragments") if isinstance(state.get("plan_fragments"), dict) else {}
+    structured = _codex_first_plan_value(
+        state.get("structured_plan") if isinstance(state.get("structured_plan"), dict) else {},
+        plans.get("structured_plan"),
+        fragments.get("structured"),
+        fragments.get("structured_plan"),
+        state.get("structured_plan_text"),
+    )
+    if isinstance(structured, str):
+        structured = _codex_json_obj_from_text(structured) or structured
+    recovered = {
+        "macro_plan": _codex_first_plan_value(plans.get("macro_plan"), plans.get("macro"), fragments.get("macro"), fragments.get("macro_plan")),
+        "structure_plan": _codex_first_plan_value(plans.get("structure_plan"), plans.get("structure"), fragments.get("structure"), fragments.get("structure_plan")),
+        "detailed_steps": _codex_first_plan_value(plans.get("detailed_steps"), plans.get("detail"), fragments.get("detail"), fragments.get("detailed_steps")),
+        "structured_plan": structured,
+    }
+    if recovered["macro_plan"] and recovered["structure_plan"] and recovered["detailed_steps"]:
+        return recovered
+    return {}
+
+
+def _codex_journal_run_id_from_state(state: dict[str, Any]) -> str:
+    if not isinstance(state, dict):
+        return ""
+    direct = str(state.get("journal_run_id") or "").strip()
+    if direct:
+        return direct
+    plans = state.get("plans") if isinstance(state.get("plans"), dict) else {}
+    journal = plans.get("_journal") if isinstance(plans.get("_journal"), dict) else _codex_json_obj_from_text(plans.get("_journal"))
+    return str(journal.get("run_id") or "").strip()
+
+
 def _codex_resume_guard_card(context: AgentShellContext, state: dict[str, Any], user_text: str) -> str:
     task = str(state.get("task") or user_text or "").strip()
     snapshot = _codex_workspace_snapshot(context, task)
@@ -1645,6 +2175,7 @@ def _codex_resume_guard_card(context: AgentShellContext, state: dict[str, Any], 
         f"error: {_prompt_safe_text(state.get('error'), limit=1000)}",
         "Resume rules:",
         "- Continue from the previous incomplete work; do not restart the project as a blank task.",
+        "- If saved_plan_fragments are complete, reuse them as the planning route; do not regenerate macro/structure/detail.",
         "- Inspect existing workspace files before writing.",
         "- Preserve previous macro/structure/detail framework and any scaffold already written.",
         "- Do not delete, overwrite, rename, or replace partial work unless the user explicitly asked for replacement.",
@@ -1796,6 +2327,14 @@ def _codex_zhixing(context: "AgentShellContext", xiaoxi: str, qinggan_ka: str = 
     ws = _codex_execution_workspace(context, xiaoxi, state_task=state_task)
     cfg = context.config
     resume_task = str(state_task or xiaoxi)[:6000]
+    prior_state = _codex_state(context) if state_task else {}
+    initial_plans = _codex_initial_plans_from_state(prior_state)
+    initial_progress_snapshot = (
+        prior_state.get("progress_snapshot")
+        if isinstance(prior_state.get("progress_snapshot"), dict)
+        else {}
+    )
+    journal_run_id = _codex_journal_run_id_from_state(prior_state)
     _save_codex_resume_state(context, {
         "status": "running",
         "task": resume_task,
@@ -1808,15 +2347,20 @@ def _codex_zhixing(context: "AgentShellContext", xiaoxi: str, qinggan_ka: str = 
         "model": str(cfg.model or ""),
         "started_at": time.time(),
         "workspace_snapshot": _codex_workspace_snapshot(context, resume_task),
+        "resume_uses_saved_plans": bool(initial_plans),
+        "journal_run_id": journal_run_id,
     })
 
     # ── 规划阶段回调：映射到前端 stream_step ──
     cengci_mingcheng = {
+        'runtime_guidance': '运行中纠偏',
+        'reframe': '重新调整框架',
         'macro': '宏观概念框架',
         'structure': '结构架构卡',
         'detail': '详细步骤',
         'structured': '结构化执行计划',
     }
+    cengci_mingcheng["planning_resume"] = "Code-X saved planning snapshot"
     
     def _guihua_liu(layer_name: str, content: Any, status: str):
         bushi_miaoshu = f"{cengci_mingcheng.get(layer_name, layer_name)}{'——开始生成...' if status == 'running' else '——已完成'}"
@@ -1835,6 +2379,21 @@ def _codex_zhixing(context: "AgentShellContext", xiaoxi: str, qinggan_ka: str = 
             if content:
                 plan_text = json.dumps(content, ensure_ascii=False, default=str) if isinstance(content, (dict, list)) else str(content)
                 plan_fragments[str(layer_name)] = plan_text[:5000]
+                if layer_name == "planning_resume" and isinstance(content, dict):
+                    for source_key, fragment_key in (
+                        ("macro_plan", "macro"),
+                        ("structure_plan", "structure"),
+                        ("detailed_steps", "detail"),
+                        ("structured_plan", "structured"),
+                    ):
+                        if content.get(source_key):
+                            fragment_value = content.get(source_key)
+                            fragment_text = (
+                                json.dumps(fragment_value, ensure_ascii=False, default=str)
+                                if isinstance(fragment_value, (dict, list))
+                                else str(fragment_value)
+                            )
+                            plan_fragments[fragment_key] = fragment_text[:5000]
             _save_codex_resume_state(context, {
                 "status": "running",
                 "task": resume_task,
@@ -1842,6 +2401,8 @@ def _codex_zhixing(context: "AgentShellContext", xiaoxi: str, qinggan_ka: str = 
                 "summary": f"Planning layer {layer_name} is {status}.",
                 "plan_fragments": plan_fragments,
                 "workspace_snapshot": _codex_workspace_snapshot(context, resume_task),
+                "resume_uses_saved_plans": bool(initial_plans),
+                "journal_run_id": journal_run_id,
             })
         except Exception:
             pass
@@ -1853,14 +2414,23 @@ def _codex_zhixing(context: "AgentShellContext", xiaoxi: str, qinggan_ka: str = 
         buzhou_jishu[0] += 1
         n = buzhou_jishu[0]
         tool_name = step_dict.get('tool_name', '?')
-        ok_str = '✅' if step_dict.get('ok') else '❌'
+        args = step_dict.get("args") if isinstance(step_dict.get("args"), Mapping) else {}
+        intent_title, intent_summary = _tool_step_intent(
+            str(tool_name),
+            args,
+            user_text=resume_task,
+            reason=str(step_dict.get("substep") or ""),
+        )
+        status_label = "成功" if step_dict.get('ok') else "失败"
+        output_preview = _prompt_safe_text(step_dict.get("output", ""), limit=120)
         progress_snapshot = step_dict.get('progress_snapshot') if isinstance(step_dict.get('progress_snapshot'), dict) else None
         _stream_step(
             f"codex_step_{n}",
-            f"第{n}步 {tool_name}",
+            f"第{n}步：{intent_title}",
             'done' if step_dict.get('ok') else 'failed',
-            f"{ok_str} {tool_name}：{str(step_dict.get('output', ''))[:80]}",
+            f"{status_label}：{intent_summary}" + (f" 结果：{output_preview}" if output_preview else ""),
             tool_name=tool_name,
+            tool_intent=intent_title,
             step_index=n,
             plan_step_id=step_dict.get('step_id'),
             substep=step_dict.get('substep'),
@@ -1876,6 +2446,7 @@ def _codex_zhixing(context: "AgentShellContext", xiaoxi: str, qinggan_ka: str = 
             steps.append({
                 "index": n,
                 "tool_name": tool_name,
+                "tool_intent": intent_title,
                 "ok": bool(step_dict.get("ok")),
                 "step_id": step_dict.get("step_id"),
                 "substep": step_dict.get("substep"),
@@ -1891,6 +2462,8 @@ def _codex_zhixing(context: "AgentShellContext", xiaoxi: str, qinggan_ka: str = 
                 "steps": steps[-24:],
                 "progress_snapshot": progress_snapshot,
                 "workspace_snapshot": _codex_workspace_snapshot(context, resume_task),
+                "resume_uses_saved_plans": bool(initial_plans),
+                "journal_run_id": journal_run_id,
             })
         except Exception:
             pass
@@ -1922,6 +2495,8 @@ def _codex_zhixing(context: "AgentShellContext", xiaoxi: str, qinggan_ka: str = 
                 "workspace": str(ws),
                 "summary": summary,
                 "progress_snapshot": snapshot,
+                "resume_uses_saved_plans": bool(initial_plans),
+                "journal_run_id": journal_run_id,
             })
         except Exception:
             pass
@@ -1941,10 +2516,17 @@ def _codex_zhixing(context: "AgentShellContext", xiaoxi: str, qinggan_ka: str = 
         buzhou_huidiao=_buzhou_liu,
         guihua_huidiao=_guihua_liu,
         jindu_huidiao=_jindu_liu,
+        initial_plans=initial_plans or None,
+        initial_progress_snapshot=initial_progress_snapshot or None,
+        journal_run_id=journal_run_id,
     )
 
+    result_status = str(getattr(result, "status", "") or ("done" if result.ok else "incomplete"))
+    result_plans = result.plans if isinstance(result.plans, dict) else {}
+    result_journal = result_plans.get("_journal") if isinstance(result_plans.get("_journal"), dict) else {}
+    result_journal_run_id = str(result_journal.get("run_id") or journal_run_id or "").strip()
     _save_codex_resume_state(context, {
-        "status": "done" if result.ok else "incomplete",
+        "status": result_status,
         "task": resume_task,
         "workspace": str(ws),
         "summary": str(result.summary or "")[:1600],
@@ -1954,10 +2536,18 @@ def _codex_zhixing(context: "AgentShellContext", xiaoxi: str, qinggan_ka: str = 
         "structured_plan": result.structured_plan,
         "progress_snapshot": result.progress_snapshot,
         "workspace_snapshot": _codex_workspace_snapshot(context, resume_task),
+        "resume_uses_saved_plans": bool(initial_plans),
+        "journal_run_id": result_journal_run_id,
     })
 
     if result.ok:
         return result.summary
+    if result_status == "waiting_for_user":
+        return f"Code-X 等待确认：{result.summary or result.error}"
+    if result_status == "external_error":
+        return f"Code-X 暂停：模型或外部服务连续异常，路线已保存，可继续恢复。{result.error or result.summary}"
+    if result_status == "blocked":
+        return f"Code-X 已阻塞但不是任务失败：{result.error or result.summary}"
     else:
         return f"Code-X 执行未完成：{result.error or result.summary}"
 
@@ -1994,6 +2584,27 @@ def _project_has_pytest_tests(context: AgentShellContext, target_rel: str) -> bo
     return any(path.name.lower().startswith("test_") or path.name.lower().endswith("_test.py") for path in candidates)
 
 
+def _execute_tool_via_spine_or_registry(context: AgentShellContext, inv: Any, tctx: Any):
+    from tiangong_agent_runtime.tool_result import ToolResult, ToolResultStatus
+
+    spine = getattr(getattr(context, "runtime", None), "spine", None)
+    if spine is not None and hasattr(spine, "execute_plan"):
+        results = spine.execute_plan(tctx, [inv])
+        if results:
+            return results[0]
+
+    fn = context.runtime.registry.get(inv.tool_name)
+    if fn is None:
+        return ToolResult(
+            inv.step_id,
+            inv.tool_name,
+            ToolResultStatus.FAILED,
+            f"未注册工具: {inv.tool_name}",
+            error_code="tool_not_registered",
+        )
+    return fn(inv, tctx)
+
+
 def _run_project_closure_tool(
     context: AgentShellContext,
     user_text: str,
@@ -2007,7 +2618,15 @@ def _run_project_closure_tool(
     from tiangong_agent_runtime.tool_result import ToolResult, ToolResultStatus
     from tiangong_agent_runtime.turn_context import TurnContext
 
-    _stream_step(step_id, title, "running", f"{title}开始", tool_name=tool_name)
+    intent_title, intent_summary = _tool_step_intent(tool_name, arguments, user_text=user_text, reason="project_closure_quality")
+    _stream_step(
+        step_id,
+        title or intent_title,
+        "running",
+        intent_summary,
+        tool_name=tool_name,
+        tool_intent=intent_title,
+    )
     inv = ToolInvocation(tool_name, arguments, step_id=step_id, reason="project_closure_quality")
     tctx = TurnContext.create(
         user_text,
@@ -2015,14 +2634,10 @@ def _run_project_closure_tool(
         model_config=context.config,
         model_client=context.model_client,
     )
-    fn = context.runtime.registry.get(tool_name)
-    if fn is None:
-        result = ToolResult(step_id, tool_name, ToolResultStatus.FAILED, f"未注册工具: {tool_name}", error_code="tool_not_registered")
-    else:
-        try:
-            result = fn(inv, tctx)
-        except Exception as exc:
-            result = ToolResult(step_id, tool_name, ToolResultStatus.FAILED, f"{type(exc).__name__}: {exc}", error_code="tool_exception")
+    try:
+        result = _execute_tool_via_spine_or_registry(context, inv, tctx)
+    except Exception as exc:
+        result = ToolResult(step_id, tool_name, ToolResultStatus.FAILED, f"{type(exc).__name__}: {exc}", error_code="tool_exception")
     status_value = getattr(result.status, "value", str(result.status))
     stream_status = "done" if result.ok else ("blocked" if status_value == "blocked" else "failed")
     _stream_step(
@@ -2031,6 +2646,7 @@ def _run_project_closure_tool(
         stream_status,
         str(result.output_summary or status_value)[:300],
         tool_name=tool_name,
+        tool_intent=intent_title,
         result_status=status_value,
         error_code=result.error_code,
     )
@@ -2162,8 +2778,8 @@ def _chuangkou_xiaoxi_gei_moxing(
 
 def _zhuru_qinggan(context: AgentShellContext, qinggan_ka: str = "", current_user: str = "") -> list[dict[str, str]]:
     """将动态情感状态注入当前窗口消息，返回新列表不修改原 session。"""
-    if not qinggan_ka:
-        qinggan_ka = _qinggan_ka(context)
+    # 本轮情志系数已经在最早统一编译阶段进入 system prompt；
+    # 后续分支只复用已编译封套，不再自动追加旧版情感卡。
     return _chuangkou_xiaoxi_gei_moxing(context, qinggan_ka=qinggan_ka, current_user=current_user, limit=10)
 
 
@@ -2241,7 +2857,7 @@ def _build_tool_schemas(context: AgentShellContext, skill_name: Any = "") -> lis
     # 过滤
     yunxu = None
     skill_names = _coerce_skill_names(skill_name)
-    routed_names = [name for name in skill_names if name not in ("Code-X 代码系统", "文件操作")]
+    routed_names = [name for name in skill_names if name != "Code-X 代码系统"]
     if routed_names:
         jineng_yingse = _jiexi_jineng_gongju()
         allowed: set[str] = set()
@@ -2370,19 +2986,30 @@ def _jiexi_jineng_gongju() -> dict[str, dict[str, object]]:
     }
     jieguo["文件操作"] = {
         "miaoshu": "读取/扫描/写入工作区文件，处理项目打包等操作",
-        "gongju": [],
+        "gongju": [
+            "list_dir",
+            "scan_project",
+            "read_file",
+            "workspace_text_search",
+            "file_sha256",
+            "write_workspace_file",
+            "make_dir",
+            "move_path",
+            "copy_path",
+            "delete_path",
+        ],
     }
     jieguo["现场学习资产化"] = {
         "miaoshu": (
             "用户明确要求现场学习、掌握新能力、生成 Skill 或 Tool 时使用；"
-            "学习后直接走 R20 active asset 激活和 smoke，不停在候选池。"
+            "默认先生成学习卡/学习计划并进入候选队列，只有用户明确要求激活或发布时才走 R20 active asset。"
         ),
         "gongju": [
             "learning_master_plan",
             "tool_skill_blueprint",
-            "learning_asset_adapter_drill",
-            "learning_asset_activation_apply",
-            "learning_asset_activation_smoke",
+            "synthesize_experience_candidates",
+            "queue_skill_candidates",
+            "queue_tool_production_requests",
             "runtime_tool_alignment_check",
         ],
     }
@@ -2523,7 +3150,7 @@ def _liaotian_gongju(context: AgentShellContext, xiaoxi: str, qinggan_ka: str = 
         str(system_msg.get("content") or "")
         + "\n\n【自动纠错协议】如果工具调用、参数、路径、检索结果或上一轮回答出现错误，"
         + "你必须基于最新工具结果自行修正并继续完成用户目标。"
-        + "最终输出必须是用户可读答案，不得把工具调用标签、函数调用 JSON 或内部占位文本交给用户。"
+        + "最终输出必须是用户可读答案，不得把 DSML、工具调用标签、函数调用 JSON、invoke/parameter 标签或内部占位文本交给用户。"
     )
     duihua = [dict(m) for m in envelope.messages[1:]]
     tool_results: list[dict[str, Any]] = []
@@ -2561,10 +3188,22 @@ def _liaotian_gongju(context: AgentShellContext, xiaoxi: str, qinggan_ka: str = 
             canshu_str = json.dumps(canshu, ensure_ascii=False)
             call_signature = json.dumps([gongju_ming, canshu], ensure_ascii=False, sort_keys=True, default=str)
             tool_call_counts[call_signature] = tool_call_counts.get(call_signature, 0) + 1
+            step_index = len(tool_results) + 1
+            step_id = _stream_step_id("tool_call", gongju_ming, step_index)
+            intent_title, intent_summary = _tool_step_intent(gongju_ming, canshu, user_text=xiaoxi, reason="tool_call")
+            _stream_step(
+                step_id,
+                f"第{step_index}步：{intent_title}",
+                "running",
+                intent_summary,
+                tool_name=gongju_ming,
+                tool_intent=intent_title,
+                step_index=step_index,
+            )
 
             from tiangong_agent_runtime.tool_invocation import ToolInvocation
             from tiangong_agent_runtime.turn_context import TurnContext
-            inv = ToolInvocation(gongju_ming, canshu, reason="tool_call")
+            inv = ToolInvocation(gongju_ming, canshu, step_id=step_id, reason="tool_call")
             tctx = TurnContext.create(xiaoxi, workspace=str(context.workspace),
                                       model_config=context.config, model_client=context.model_client)
             if tool_call_counts[call_signature] > 2:
@@ -2574,15 +3213,29 @@ def _liaotian_gongju(context: AgentShellContext, xiaoxi: str, qinggan_ka: str = 
                 }
                 force_finalize = True
             else:
-                jieguo_fn = context.runtime.registry.get(gongju_ming)
-                if jieguo_fn is None:
-                    gongju_jg = {"error": f"\u672a\u6ce8\u518c\u5de5\u5177: {gongju_ming}"}
-                else:
-                    try:
-                        r = jieguo_fn(inv, tctx)
-                        gongju_jg = {"ok": r.ok, "summary": r.output_summary, "data": r.data if isinstance(r.data, dict) else {"content": str(r.data)}}
-                    except Exception as exc:
-                        gongju_jg = {"error": str(exc)}
+                try:
+                    r = _execute_tool_via_spine_or_registry(context, inv, tctx)
+                    gongju_jg = {"ok": r.ok, "summary": r.output_summary, "data": r.data if isinstance(r.data, dict) else {"content": str(r.data)}, "status": getattr(r.status, "value", str(r.status)), "error_code": r.error_code}
+                except Exception as exc:
+                    gongju_jg = {"error": str(exc)}
+            result_status = str(gongju_jg.get("status") or ("failed" if gongju_jg.get("error") else "ok"))
+            stream_status = (
+                "blocked"
+                if result_status == "blocked" or gongju_jg.get("error") == "repeated_tool_call_blocked"
+                else ("done" if bool(gongju_jg.get("ok", not gongju_jg.get("error"))) else "failed")
+            )
+            result_summary = _prompt_safe_text(gongju_jg.get("summary") or gongju_jg.get("error") or result_status, limit=300)
+            _stream_step(
+                step_id,
+                f"第{step_index}步：{intent_title}",
+                stream_status,
+                result_summary,
+                tool_name=gongju_ming,
+                tool_intent=intent_title,
+                step_index=step_index,
+                result_status=result_status,
+                error_code=gongju_jg.get("error_code") or gongju_jg.get("error"),
+            )
             tool_results.append({
                 "tool_name": gongju_ming,
                 "arguments": canshu,
@@ -2644,41 +3297,25 @@ def _manual_learning_request() -> dict[str, str]:
 
 def _run_manual_learning_task(context: AgentShellContext, tiao_id: str, xiaoxi: str, *, persist: bool = False) -> str:
     rt = context.runtime
-    _stream_step("manual_learning_pick", "接入学习候选", "running", f"正在读取经验池条目 {tiao_id}")
-    item = None
-    try:
-        item = rt.jingyan_chi.tiaomu_by_id(tiao_id)
-    except Exception:
-        item = None
-    if item is None:
-        message = f"未找到经验池条目：{tiao_id}"
-        _stream_step("manual_learning_pick", "接入学习候选", "failed", message)
-        write_line(message)
-        return message
-    if bool(getattr(item, "yichuli", False)):
-        message = f"这条经验已经学习过：{tiao_id}"
-        _stream_step("manual_learning_pick", "接入学习候选", "failed", message)
-        write_line(message)
-        return message
-    summary = str(getattr(item, "zhaiyao", "") or "")[:180]
-    _stream_step("manual_learning_pick", "接入学习候选", "done", summary or "候选已接入前台学习任务")
-    _stream_step("manual_learning_run", "执行主动学习", "running", "搜索资料、萃取知识、判定是否生成技能或工具候选")
+    _stream_step("manual_learning_pick", "接入学习卡", "running", f"正在读取学习卡 {tiao_id}")
+    _stream_step("manual_learning_pick", "接入学习卡", "done", "学习卡已接入前台学习任务")
+    _stream_step("manual_learning_run", "执行主动学习", "running", "按优先级与学习卡SOP执行学习、质检和归类")
     try:
         from tiangong_agent_runtime.turn_context import TurnContext
 
         turn_context = TurnContext.create(
-            xiaoxi or f"前台主动学习经验池条目 {tiao_id}",
+            xiaoxi or f"前台主动学习卡 {tiao_id}",
             workspace=context.workspace,
             max_steps=max(1, int(getattr(context, "max_steps", 20) or 20)),
             model_config=context.config,
             model_client=context.model_client,
         )
-        result = rt._run_free_will_learning_chain(
+        result = rt.run_learning_card_now(
             context.model_client,
             turn_context,
-            laiyuan="manual_approval",
+            tiao_id or "__next__",
             model_config=context.config,
-            target_tiao_id=tiao_id,
+            run_mode="manual_now",
         )
     except ModelClientError as exc:
         message = _model_connection_failed_message(exc)
@@ -2690,14 +3327,9 @@ def _run_manual_learning_task(context: AgentShellContext, tiao_id: str, xiaoxi: 
         _stream_step("manual_learning_run", "执行主动学习", "failed", message)
         write_line(message)
         return message
-    final = (
-        "主动学习已完成。\n\n"
-        f"经验条目：{tiao_id}\n"
-        f"学习内容：{summary or '未提供摘要'}\n"
-        f"执行结果：{result or '学习链无返回'}"
-    )
     _stream_step("manual_learning_run", "执行主动学习", "done", str(result or "学习链已完成")[:240])
     _stream_step("complete", "完成", "done", "主动学习任务已完成")
+    final = str(result or "主动学习已完成。")
     write_line(final)
     if persist:
         try:
@@ -2708,7 +3340,7 @@ def _run_manual_learning_task(context: AgentShellContext, tiao_id: str, xiaoxi: 
     return final
 
 
-def _hou_chuli(context: AgentShellContext, xiaoxi: str, jieguo: str, lujing: str) -> None:
+def _hou_chuli(context: AgentShellContext, xiaoxi: str, jieguo: str, lujing: str, skill_names: Any = None) -> None:
     """后处理：经验合成 → 记忆存储。显式学习/资产化已前移到执行链。"""
     rt = context.runtime
     clean_jieguo = _strip_think_blocks(jieguo)
@@ -2728,6 +3360,28 @@ def _hou_chuli(context: AgentShellContext, xiaoxi: str, jieguo: str, lujing: str
         rt.remember_turn(xiaoxi=xiaoxi, huifu=clean_jieguo, lujing=lujing)
     except Exception:
         pass
+
+    try:
+        if _looks_like_active_learning_request(xiaoxi, skill_names):
+            creator = getattr(rt, "create_learning_card_from_request", None)
+            if callable(creator):
+                card = creator(
+                    xiaoxi,
+                    learning_result=clean_jieguo,
+                    lujing=lujing or "active_learning_skill",
+                    client=getattr(context, "model_client", None),
+                    model_config=getattr(context, "config", None),
+                    workspace=getattr(context, "workspace", ""),
+                    skill_names=_coerce_skill_names(skill_names),
+                )
+                card_id = str((card or {}).get("card_id") or "")
+                if card_id:
+                    _stream_step("active_learning_card", "生成学习卡", "done", f"已加入学习卡队列：{card_id}")
+    except Exception as exc:
+        _stream_step("active_learning_card", "生成学习卡", "failed", f"{exc.__class__.__name__}: {str(exc)[:160]}")
+
+    if _desktop_fast_return_enabled():
+        return
 
 
 # ── 主入口 ────────────────────────────────────────
@@ -2750,6 +3404,7 @@ def _shuaxin_tishi_ci(
     prompt_event_cards: list[str] | None = None,
     emotion_total_cards: list[str] | None = None,
     runtime_material_cards: list[str] | None = None,
+    include_base_organ_signal_cards: bool = True,
 ) -> None:
     """刷新 PromptCompiler 器官卡。"""
     try:
@@ -2761,6 +3416,7 @@ def _shuaxin_tishi_ci(
             prompt_event_cards=prompt_event_cards,
             emotion_total_cards=emotion_total_cards,
             runtime_material_cards=runtime_material_cards,
+            include_base_organ_signal_cards=include_base_organ_signal_cards,
         )
     except Exception:
         pass
@@ -2770,21 +3426,16 @@ def _hebing_panding(context: AgentShellContext, xiaoxi: str, qinggan_ka: str) ->
     """② 合并判定：LLM 从所有技能列表中自主选择。返回 (路径, 自然回复, skill名列表)"""
     attachment_fallback_skill = _recommended_attachment_skill(xiaoxi)
     selected_skills = _frontend_selected_skill_names()
-    if "[Code-X续跑请求]" in str(xiaoxi or "") or _looks_like_explicit_codex_request(xiaoxi):
-        return "work", "", ["Code-X 代码系统"]
-    if _looks_like_code_analysis_request(xiaoxi):
-        return "work", "", ["Code-X 代码系统"]
     # 模式硬约束：前端 mode 选择优先
+    frontend_mode = str(os.getenv("LINYUANZHE_FRONTEND_WORK_MODE") or os.getenv("TIANGONG_FRONTEND_WORK_MODE") or "auto").strip().lower()
+    if frontend_mode == "chat":
+        return "chat", "", []
+    if frontend_mode == "work":
+        return "work", "", selected_skills
     moshi = str(getattr(context.config, "tool_execution_mode", "") or "").strip()
     if moshi == "disabled":
         return "chat", "", []
     attachment_content_skill = _attachment_content_skill_for_model(context, xiaoxi)
-    if attachment_content_skill:
-        return "work", "", _merge_skill_names(selected_skills, attachment_content_skill)
-    if _looks_like_web_search_request(xiaoxi):
-        return "work", "", _merge_skill_names(selected_skills, "联网搜索")
-    if moshi == "runtime_governed":
-        return "work", "", selected_skills
 
     # LLM 自主判定：chat 还是 work，选哪个技能
     xitong = context.session.messages[0].get("content", "") if context.session.messages else ""
@@ -2812,20 +3463,15 @@ def _hebing_panding(context: AgentShellContext, xiaoxi: str, qinggan_ka: str) ->
 回复格式：
 第一行：自然回复
 第二行：chat 或 work: 能力包名1, 能力包名2"""
+    yonghu += "\n\n[RoutingContract] You are the skill-selection judge. No backend keyword rule is allowed to inject Code-X for you. Choose work for actionable tasks, then choose the skill_names yourself from the skill list."
     try:
         result = _qingliang_llm(context, xitong, yonghu)
     except Exception:
-        if attachment_fallback_skill:
-            return "work", "", _merge_skill_names(selected_skills, attachment_fallback_skill)
         return ("work", "", selected_skills) if selected_skills else ("chat", "", [])
     if not result or not result.strip():
-        if attachment_fallback_skill:
-            return "work", "", _merge_skill_names(selected_skills, attachment_fallback_skill)
         return ("work", "", selected_skills) if selected_skills else ("chat", "", [])
     lines = [l.strip() for l in result.split("\n") if l.strip()]
     if not lines:
-        if attachment_fallback_skill:
-            return "work", "", _merge_skill_names(selected_skills, attachment_fallback_skill)
         return ("work", "", selected_skills) if selected_skills else ("chat", "", [])
     panding = lines[-1].lower()
     ziran = "\n".join(lines[:-1]) if len(lines) > 1 else ""
@@ -2837,12 +3483,114 @@ def _hebing_panding(context: AgentShellContext, xiaoxi: str, qinggan_ka: str) ->
         for m in mingcheng:
             if m in jineng_raw:
                 matched.append(m)
-        return "work", ziran, _merge_skill_names(selected_skills, matched, attachment_fallback_skill)
-    if attachment_content_skill:
-        return "work", ziran, _merge_skill_names(selected_skills, attachment_content_skill)
+        return "work", ziran, _merge_skill_names(selected_skills, matched)
     if selected_skills and "chat" not in panding:
         return "work", ziran, selected_skills
     return "chat", ziran, []
+
+
+def _route_skill_candidates(context: AgentShellContext, xiaoxi: str) -> list[str]:
+    """Non-authoritative hints for the independent route judge."""
+    return _sanitize_routed_skill_names(xiaoxi, _frontend_selected_skill_names())
+
+
+def _parse_route_judge_result(context: AgentShellContext, raw: str, candidates: list[str], user_text: str = "") -> tuple[str, str, list[str]] | None:
+    data = _json_object_from_model_text(raw)
+    if data:
+        route = _prompt_safe_text(data.get("route") or data.get("intent_type") or data.get("task_type"), limit=40).lower()
+        work_type = _prompt_safe_text(data.get("work_type") or data.get("subtype"), limit=80).lower()
+        natural_reply = _prompt_safe_text(data.get("natural_reply") or data.get("reply") or "", limit=1000)
+        skill_raw = data.get("skill_names") or data.get("skills") or []
+        skills = _coerce_skill_names(skill_raw)
+        if route in {"chat", "ordinary_chat", "normal_chat"}:
+            return "chat", natural_reply, []
+        if route in {"work", "execute", "task", "work_task"}:
+            is_file_work_type = any(token in work_type for token in ("file", "document", "docs", "sheet", "office", "文件", "目录", "文档", "表格", "桌面"))
+            if is_file_work_type:
+                return "work", natural_reply, _file_task_skill_names(_merge_skill_names(skills, candidates), default_to_file_ops=False)
+            merged = _merge_skill_names(skills, candidates)
+            if _looks_like_file_task_request(user_text):
+                merged = _file_task_skill_names(merged, default_to_file_ops=False)
+            return "work", natural_reply, merged
+    lines = [line.strip() for line in str(raw or "").splitlines() if line.strip()]
+    if not lines:
+        return None
+    last = lines[-1].lower()
+    natural_reply = "\n".join(lines[:-1]) if len(lines) > 1 else ""
+    if last == "chat" or last.startswith("chat"):
+        return "chat", natural_reply, []
+    if last.startswith("work"):
+        skill_text = last.replace("work:", "").replace("work：", "").strip()
+        known = list(_jiexi_jineng_gongju().keys())
+        matched = [name for name in known if name in skill_text]
+        merged = _merge_skill_names(matched, candidates)
+        if _looks_like_file_task_request(user_text):
+            merged = _file_task_skill_names(merged, default_to_file_ops=False)
+        return "work", natural_reply, merged
+    return None
+
+
+def _hebing_panding_v2(context: AgentShellContext, xiaoxi: str, qinggan_ka: str = "") -> tuple[str, str, list[str]]:
+    """Independent model-first route judge after the compiled prompt envelope exists."""
+    moshi = str(getattr(context.config, "tool_execution_mode", "") or "").strip()
+    if moshi == "disabled":
+        return "chat", "", []
+    selected_skills = _frontend_selected_skill_names()
+    candidates = _route_skill_candidates(context, xiaoxi)
+    xitong = context.session.messages[0].get("content", "") if context.session.messages else ""
+    zhidao = _jineng_zhidao()
+    selected_card = _frontend_selected_skills_card()
+    permission_card = _frontend_permission_card(context)
+    shangxiawen = context.session.build_context_hint(turns=10, max_chars=3000)
+    frontend_mode = str(os.getenv("LINYUANZHE_FRONTEND_WORK_MODE") or os.getenv("TIANGONG_FRONTEND_WORK_MODE") or "auto").strip().lower()
+    yonghu = f"""你是本轮任务类型判定模型。系统提示词、Soul、记忆召回链、最近10轮对话卡、情志系统系数卡已经完成统一编译。
+你必须单独判断当前轮进入普通聊天还是工作任务；你不是工具，不能执行任务，不能声称已经完成任务。
+
+当前用户消息：
+{xiaoxi}
+
+最近上下文：
+{shangxiawen}
+
+前端模式提示：{frontend_mode}
+已选能力包：{selected_skills}
+候选能力提示（只作参考，不是规则强制）：{candidates}
+
+判定要求：
+- 普通问候、闲聊、解释、讨论、无需读取/写入/运行/搜索/安装/打包的问答：route=chat。
+- 代码、仓库、工程、bug、测试、构建、修复、审查、迁移：通常 route=work, work_type=code；是否选择 Code-X 代码系统由你根据技能列表自主决定。
+- 文件、目录、读取、写入、整理、解析本地文档：通常 route=work, work_type=file；在 文件操作、文件管理、文档处理、数据表格分析、办公套件 等能力中自主选择。
+- 网络搜索、下载、学习、质检、交付等其他动作：route=work，并选择最合适能力包。
+- A5 或越界风险只标记 risk_level，不要由本判定模型执行阻断。
+- work 任务必须输出你自主选择的 skill_names；后端不会替你注入 Code-X。
+
+{selected_card}
+
+{permission_card}
+
+{zhidao}
+
+只输出 JSON：
+{{
+  "route": "chat 或 work",
+  "work_type": "none/code/file/tool/search/quality/other",
+  "skill_names": [],
+  "risk_level": "A0",
+  "natural_reply": ""
+}}"""
+    try:
+        raw = _qingliang_llm(context, xitong, yonghu)
+        parsed = _parse_route_judge_result(context, raw, candidates, xiaoxi)
+        if parsed is not None:
+            route, natural, skills = parsed
+            if route == "work" and not skills:
+                skills = _merge_skill_names(selected_skills, candidates)
+            if route == "work":
+                skills = _sanitize_routed_skill_names(xiaoxi, skills)
+            return route, natural, skills
+    except Exception:
+        pass
+    return _hebing_panding(context, xiaoxi, qinggan_ka)
 
 
 def run_once(context: AgentShellContext, xiaoxi: str, persist: bool = True) -> str:
@@ -2878,40 +3626,57 @@ def run_once(context: AgentShellContext, xiaoxi: str, persist: bool = True) -> s
 
     # ② 合并判定（含 skill 选择，一轮 LLM）
     _stream_step("route", "合并判定与能力路由", "running", "正在判断 chat/work 与能力包")
-    lujing, ziran_huifu, jineng = _hebing_panding(context, moxing_xiaoxi, qinggan_ka)
+    lujing, ziran_huifu, jineng = _hebing_panding_v2(context, moxing_xiaoxi, qinggan_ka)
     jineng_liebiao = _coerce_skill_names(jineng)
+    if lujing != "chat":
+        jineng_liebiao = _strip_codex_from_non_code_work(xiaoxi_session, jineng_liebiao)
+    if lujing != "chat" and _should_execute_file_branch(xiaoxi_session, jineng_liebiao):
+        jineng_liebiao = _file_task_skill_names(jineng_liebiao)
     jineng_label = "、".join(jineng_liebiao) if jineng_liebiao else "无"
     _stream_step("route", "合并判定与能力路由", "done", f"路由={lujing or 'chat'}；能力={jineng_label}")
+    if lujing != "chat" and not jineng_liebiao:
+        message = "我判断这是工作任务，但本轮没有选定可执行能力包。为避免系统代替模型硬塞工具，本轮已停止执行。"
+        _stream_step("execute", "等待能力选择", "failed", message)
+        write_line(message)
+        _stream_step("complete", "完成", "done", "本轮因缺少可执行能力包停止")
+        return message
 
     try:
         if lujing == "chat":
             _stream_step("execute", "执行聊天回复", "running", "走 chat 分支生成自然回复")
-            jieguo = ziran_huifu or _chat_route_fallback(xiaoxi_session)
+            jieguo = ziran_huifu
             if not jieguo:
                 jieguo = _liaotian_chun(context, moxing_xiaoxi, qinggan_ka)
             shoukou = jieguo
             _stream_step("execute", "执行聊天回复", "done", "自然回复已生成")
         else:
-            if "Code-X 代码系统" in jineng_liebiao:
-                _stream_step("execute", "执行代码任务", "running", "走 code 分支处理代码/项目请求")
+            file_branch_skills = _file_task_skill_names(jineng_liebiao) if _should_execute_file_branch(xiaoxi_session, jineng_liebiao) else []
+            if file_branch_skills:
+                _stream_step("execute", "执行文件任务", "running", "准备处理文件任务：先确认目标路径，再读取、写入或整理文件。")
+                jieguo = _wenjian_zhixing(context, moxing_xiaoxi, qinggan_ka, skill_names=file_branch_skills)
+                shoukou = jieguo
+                lujing = "file"
+                _stream_step("execute", "执行文件任务", "done", "文件分支已返回结果")
+            elif "Code-X 代码系统" in jineng_liebiao:
+                _stream_step("execute", "执行代码任务", "running", "准备进入 Code-X 代码链，先规划再读取、修改和验证项目。")
                 jieguo = _daima_xiufu(context, moxing_xiaoxi, qinggan_ka, state_task=codex_state_task)
                 shoukou = jieguo
                 lujing = "code"
                 _stream_step("execute", "执行代码任务", "done", "代码分支已返回结果")
             elif "项目收口质检" in jineng_liebiao:
-                _stream_step("execute", "执行项目收口质检", "running", "项目扫描、语法检查、测试检查、项目诊断、质量裁决与交付报告")
+                _stream_step("execute", "执行项目收口质检", "running", "准备按项目交付标准依次扫描、检查语法、运行测试、诊断风险并做质量裁决。")
                 jieguo = _xiangmu_shoukou_zhijian(context, moxing_xiaoxi, qinggan_ka)
                 shoukou = jieguo
                 lujing = "project_closure_quality"
                 _stream_step("execute", "执行项目收口质检", "done", "项目收口质检已返回结果")
             elif "文件操作" in jineng_liebiao:
-                _stream_step("execute", "执行文件任务", "running", "走 file 分支处理文件操作")
-                jieguo = _wenjian_zhixing(context, moxing_xiaoxi, qinggan_ka)
+                _stream_step("execute", "执行文件任务", "running", "准备处理文件任务：先确认目标路径，再读取、写入或整理文件。")
+                jieguo = _wenjian_zhixing(context, moxing_xiaoxi, qinggan_ka, skill_names=jineng_liebiao)
                 shoukou = jieguo
                 lujing = "file"
                 _stream_step("execute", "执行文件任务", "done", "文件分支已返回结果")
             else:
-                _stream_step("execute", "执行工具任务", "running", f"走 tool 分支：{jineng_label or '默认工具链'}")
+                _stream_step("execute", "执行工具任务", "running", f"准备根据能力包选择必要工具并边执行边校验结果：{jineng_label or '默认工具链'}")
                 jieguo = _liaotian_gongju(context, moxing_xiaoxi, qinggan_ka, jineng_liebiao)
                 shoukou = jieguo
                 lujing = "tool"
@@ -2947,9 +3712,7 @@ def run_once(context: AgentShellContext, xiaoxi: str, persist: bool = True) -> s
         context.session.add_user(xiaoxi_session)
         context.session.add_assistant(shoukou)
     _stream_step("output_session", "输出与会话写入", "done", "回复与会话已写入" if persist else "回复已写出")
-    _stream_step("postprocess", "后处理", "running", "经验合成、L1落盘、晋升与遗忘检查")
-    _hou_chuli(context, xiaoxi_session, jieguo, lujing)
-    _stream_step("postprocess", "后处理", "done", "后处理完成")
+    _hou_chuli(context, xiaoxi_session, jieguo, lujing, jineng_liebiao)
     _stream_step("complete", "完成", "done", "本轮链路已完成")
     return jieguo
 
@@ -3003,26 +3766,42 @@ def run_interactive(context: AgentShellContext) -> int:
 
 # Windows migration repair: override mojibake prompt/report strings for the
 # direct-file pathway. Frontend Chinese text is intentionally untouched.
-def _wenjian_zhixing(context: AgentShellContext, xiaoxi: str, qinggan_ka: str = "") -> str:
-    """文件执行：扫描工作区，LLM 通过真实工具操作文件。"""
-    return _codex_zhixing(context, xiaoxi, qinggan_ka)
+def _wenjian_zhixing(context: AgentShellContext, xiaoxi: str, qinggan_ka: str = "", *, skill_names: Any = None) -> str:
+    """文件执行：走普通工具链，不复用 Code-X 三层规划。"""
+    routed_skills = _file_task_skill_names(skill_names or ["文件操作"])
+    target_workspace = _file_task_workspace_override(context, xiaoxi)
+    task_context = context
+    task_message = xiaoxi
+    if target_workspace is not None:
+        try:
+            task_context = replace(context, workspace=target_workspace)
+            task_message = (
+                f"{xiaoxi}\n\n"
+                f"[文件任务目标提示]\n"
+                f"用户提到桌面，本轮文件任务目标目录已定位为：{target_workspace}\n"
+                "请先 list_dir 确认真实文件，再按用户目标使用文件工具处理。"
+                "这不是代码诊断任务，不要调用 Code-X、代码质量检查或项目规划流程。"
+            )
+        except Exception:
+            task_context = context
+    return _liaotian_gongju(task_context, task_message, qinggan_ka, routed_skills)
 
 
 def _mojibake_score(text: str) -> int:
     marker_score = sum(text.count(marker) * 3 for marker in _MOJIBAKE_MARKERS)
     private_use_score = sum(3 for ch in text if "\\ue000" <= ch <= "\\uf8ff")
     replacement_score = text.count("\\ufffd") * 4
-    common_mojibake = (
-        "涓", "鍐", "鏂", "浠", "瀵", "杈", "鐩", "宸", "閫", "鍚",
-        "绋", "璺", "鍙", "鎵", "杩", "瑙", "淇", "妯", "瀛", "绾",
-        "浣", "绯", "鍏", "婊", "姝", "妫", "泞",
-    )
+    common_mojibake = tuple(chr(code) for code in (
+        0x6D93, 0x9350, 0x93C2, 0x6D60, 0x7035, 0x6748, 0x9429, 0x5BB8, 0x95AB, 0x935A,
+        0x7ECB, 0x74BA, 0x9359, 0x93B5, 0x6769, 0x7459, 0x6DC7, 0x59AF, 0x701B, 0x7EFE,
+        0x6D63, 0x7EEF, 0x934F, 0x5A4A, 0x59DD, 0x59AB, 0x6CDE,
+    ))
     common_score = sum(text.count(marker) for marker in common_mojibake)
     return marker_score + private_use_score + replacement_score + common_score
 
 
 
-_MOJIBAKE_MARKERS = ('澶', '閫', '犵', '墿', '鈧', '€', '�')
+_MOJIBAKE_MARKERS = tuple(chr(code) for code in (0x6FB6, 0x95AB, 0x72B5, 0x58BF, 0x9227, 0x20AC, 0xFFFD))
 
 
 def _read_text_file_for_prompt(path: Path) -> tuple[str, str, bool]:
@@ -3075,6 +3854,21 @@ def _du_gongzuoqu_wenjian(ws: Path) -> str:
     jieguo = [f"工作区根目录：{ws}"]
     zong = 0
     files: list[Path] = []
+    try:
+        resolved_ws = ws.expanduser().resolve()
+        if os.name == "nt" and resolved_ws.anchor and resolved_ws == Path(resolved_ws.anchor):
+            entries = []
+            try:
+                for item in sorted(resolved_ws.iterdir(), key=lambda value: value.name.lower())[:120]:
+                    prefix = "[D]" if item.is_dir() else "[F]"
+                    entries.append(f"{prefix} {item.name}")
+            except OSError:
+                entries = ["(根盘一级目录无法读取)"]
+            jieguo.append("[根盘模式] 已支持把整个盘作为工作区；为避免全盘递归扫描，本轮只列一级目录。请在任务中指定子目录或文件后继续处理。")
+            jieguo.append("\n".join(entries) if entries else "(根盘为空)")
+            return "\n".join(jieguo)
+    except OSError:
+        pass
     try:
         iterator = ws.rglob("*")
     except OSError:

@@ -73,6 +73,7 @@ def refresh_session_system_prompt(
     emotion_total_cards: Iterable[str] | None = None,
     runtime_material_cards: Iterable[str] | None = None,
     extra_organ_signal_cards: Iterable[OrganSignalCard] | None = None,
+    include_base_organ_signal_cards: bool = True,
 ) -> tuple[OrganSignalCard, ...]:
     """收集器官卡、刷新 system prompt，并写入 PromptTrace 起点。
 
@@ -84,7 +85,11 @@ def refresh_session_system_prompt(
     from .homeostasis_prompt_tuner import get_prompt_tuning_state
 
     task = _normalize_task(task_mode)
-    base_cards = collect_organ_signal_cards(context, user_text=user_text, task_mode=task)
+    base_cards = (
+        collect_organ_signal_cards(context, user_text=user_text, task_mode=task)
+        if include_base_organ_signal_cards
+        else ()
+    )
     if prompt_event_cards:
         base_cards = tuple(card for card in base_cards if card.organ_type != "memory")
     if emotion_total_cards:

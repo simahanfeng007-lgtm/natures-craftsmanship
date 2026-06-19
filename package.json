@@ -2,23 +2,26 @@
   "name": "linyuanzhe-electron-web",
   "version": "0.2.0",
   "private": true,
-  "description": "Electron + Web shell for Tiangong RuntimeHost.",
+  "description": "天工造物 RuntimeHost 桌面端。",
   "main": "main.js",
   "scripts": {
     "ensure": "node scripts/ensure-electron-runtime.mjs",
     "start": "npm run ensure && electron .",
     "smoke": "node scripts/smoke.mjs",
-    "dist": "npm run ensure && electron-builder",
-    "dist:win": "npm run ensure && electron-builder --win nsis portable",
-    "dist:linux": "npm run ensure && electron-builder --linux AppImage deb tar.gz",
-    "dist:mac": "npm run ensure && electron-builder --mac dmg zip"
+    "dist": "npm run ensure && node ./node_modules/electron-builder/cli.js",
+    "dist:win": "npm run ensure && node ./node_modules/electron-builder/cli.js --win nsis portable",
+    "dist:linux": "npm run ensure && node ./node_modules/electron-builder/cli.js --linux AppImage deb tar.gz",
+    "dist:mac": "npm run ensure && node ./node_modules/electron-builder/cli.js --mac dmg zip",
+    "verify:dist": "node scripts/verify-win-dist.mjs",
+    "release:win": "npm run ensure && npm run smoke && npm run dist:win && npm run verify:dist"
   },
   "build": {
     "appId": "cn.tiangongzaowu.linyuanzhe",
     "productName": "天工造物-临渊者",
-    "artifactName": "${productName}-Setup-${version}.${ext}",
+    "artifactName": "${productName}-${version}-${arch}.${ext}",
     "directories": {
-      "output": "../../installer/dist"
+      "output": "dist",
+      "buildResources": "build"
     },
     "files": [
       "main.js",
@@ -28,7 +31,7 @@
     ],
     "extraResources": [
       {
-        "from": "../..",
+        "from": "resources/backend",
         "to": "backend",
         "filter": [
           "run_agent.py",
@@ -50,14 +53,23 @@
         ]
       },
       {
-        "from": "../../installer/runtime/backend_runtime",
+        "from": "resources/backend_runtime",
         "to": "backend_runtime",
         "filter": [
-          "**/*"
+          "**/*",
+          "!**/__pycache__/**",
+          "!**/*.pyc",
+          "!**/*.pyo",
+          "!**/.pytest_cache/**",
+          "!**/.mypy_cache/**",
+          "!**/.ruff_cache/**",
+          "!**/*.log",
+          "!**/*.tmp",
+          "!**/*.bak"
         ]
       },
       {
-        "from": "../../installer/PACKAGING_PRODUCTIZATION_NOTICE.md",
+        "from": "resources/PACKAGING_PRODUCTIZATION_NOTICE.md",
         "to": "PACKAGING_PRODUCTIZATION_NOTICE.md"
       }
     ],
@@ -67,7 +79,12 @@
       "target": [
         "nsis",
         "portable"
-      ]
+      ],
+      "icon": "build/icon.ico",
+      "legalTrademarks": "天工造物",
+      "requestedExecutionLevel": "asInvoker",
+      "signAndEditExecutable": true,
+      "signExecutable": false
     },
     "linux": {
       "target": [
@@ -88,16 +105,38 @@
       "guid": "cn.tiangongzaowu.linyuanzhe",
       "oneClick": false,
       "perMachine": false,
-      "allowToChangeInstallationDirectory": false,
+      "allowToChangeInstallationDirectory": true,
       "deleteAppDataOnUninstall": false,
-      "createDesktopShortcut": true,
+      "createDesktopShortcut": "always",
       "createStartMenuShortcut": true,
       "shortcutName": "天工造物-临渊者",
-      "uninstallDisplayName": "天工造物-临渊者"
+      "uninstallDisplayName": "天工造物-临渊者",
+      "selectPerMachineByDefault": false,
+      "allowElevation": true,
+      "menuCategory": "天工造物",
+      "installerIcon": "build/installerIcon.ico",
+      "uninstallerIcon": "build/uninstallerIcon.ico",
+      "installerHeader": "build/installerHeader.bmp",
+      "installerSidebar": "build/installerSidebar.bmp",
+      "uninstallerSidebar": "build/uninstallerSidebar.bmp",
+      "license": "build/license_zh_CN.txt",
+      "displayLanguageSelector": false,
+      "installerLanguages": [
+        "zh_CN"
+      ],
+      "language": "2052",
+      "artifactName": "${productName}-${version}-${arch}-Setup.${ext}"
+    },
+    "copyright": "Copyright © 2026 天工造物",
+    "portable": {
+      "artifactName": "${productName}-${version}-${arch}-Portable.${ext}",
+      "requestExecutionLevel": "user"
     }
   },
   "devDependencies": {
-    "electron": "^37.2.0",
-    "electron-builder": "^26.15.2"
-  }
+    "electron": "^42.4.1",
+    "electron-builder": "^26.15.3"
+  },
+  "productName": "天工造物-临渊者",
+  "author": "天工造物"
 }

@@ -168,6 +168,9 @@ GONGJU_CANSHU_SCHEMA: dict[str, dict[str, Any]] = {
         "type": "object",
         "properties": {
             "path": {"type": "string", "description": "要列出的目录路径，默认工作区根目录"},
+            "dir_path": {"type": "string", "description": "Alias for path."},
+            "directory": {"type": "string", "description": "Alias for path."},
+            "folder": {"type": "string", "description": "Alias for path."},
         },
         "required": [],
     },
@@ -270,7 +273,10 @@ GONGJU_CANSHU_SCHEMA: dict[str, dict[str, Any]] = {
             "command": {"type": "string", "description": "命令类型（compileall 或 pytest），默认 compileall"},
             "command_type": {"type": "string", "description": "命令类型别名"},
             "target": {"type": "string", "description": "目标路径，默认当前工作区"},
+            "path": {"type": "string", "description": "Alias for target."},
+            "file": {"type": "string", "description": "Alias for target."},
             "timeout": {"type": "number", "description": "超时秒数"},
+            "timeout_sec": {"type": "number", "description": "Alias for timeout."},
         },
         "required": [],
     },
@@ -278,7 +284,10 @@ GONGJU_CANSHU_SCHEMA: dict[str, dict[str, Any]] = {
         "type": "object",
         "properties": {
             "target": {"type": "string", "description": "测试目标路径，默认当前工作区"},
+            "path": {"type": "string", "description": "Alias for target."},
+            "file": {"type": "string", "description": "Alias for target."},
             "timeout": {"type": "integer", "description": "超时时间（秒），范围 5-300"},
+            "timeout_sec": {"type": "integer", "description": "Alias for timeout."},
         },
         "required": [],
     },
@@ -334,6 +343,24 @@ GONGJU_CANSHU_SCHEMA: dict[str, dict[str, Any]] = {
             "max_chars": {"type": "integer", "description": "最大字符数，默认 12000"},
         },
         "required": [],
+    },
+    "web_download": {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string", "description": "Download URL"},
+            "href": {"type": "string", "description": "Alias for url."},
+            "link": {"type": "string", "description": "Alias for url."},
+            "source": {"type": "string", "description": "Alias for url."},
+            "target": {"type": "string", "description": "Workspace-relative output file or directory. Defaults to downloads/<filename>."},
+            "path": {"type": "string", "description": "Alias for target."},
+            "output": {"type": "string", "description": "Alias for target."},
+            "filename": {"type": "string", "description": "Output filename alias when target is not provided."},
+            "timeout": {"type": "number", "description": "Timeout seconds. Default 30, max 120."},
+            "timeout_sec": {"type": "number", "description": "Alias for timeout."},
+            "max_bytes": {"type": "integer", "description": "Maximum bytes. Default 50MB, max 200MB."},
+            "overwrite": {"type": "boolean", "description": "Overwrite existing target. Default false."},
+        },
+        "required": ["url"],
     },
     "web_search": {
         "type": "object",
@@ -418,6 +445,12 @@ GONGJU_TONGYONG_CANSHU: dict[str, Any] = {
     },
     "required": [],
 }
+try:
+    from .codex_tool_specs import codex_tool_schemas
+except ImportError:  # pragma: no cover - supports direct script-style imports
+    from codex_tool_specs import codex_tool_schemas  # type: ignore
+GONGJU_CANSHU_SCHEMA.update(codex_tool_schemas())
+
 # TG_MULTIMEDIA_SCHEMA_BEGIN
 try:
     from .tool_schemas_multimedia_additions import MULTIMEDIA_TOOL_SCHEMAS

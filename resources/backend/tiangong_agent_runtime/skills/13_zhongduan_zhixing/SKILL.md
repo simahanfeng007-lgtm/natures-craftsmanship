@@ -1,5 +1,13 @@
 # 终端执行
 
+## 工具
+
+- `run_python_quality_check`
+- `run_python_tests`
+- `runtime_tool_alignment_check`
+- `runtime_llm_operational_drill`
+- `return_analysis`
+
 ## 1. 定位
 终端执行是临渊者真实执行力的关键接口，面向受审计测试、编译、诊断、Runtime对齐、执行报告。不等同于无限制shell；只在可用工具范围内执行，不存在裸shell时不得伪装执行。
 

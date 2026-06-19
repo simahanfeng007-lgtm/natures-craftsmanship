@@ -11,7 +11,7 @@ from .v1_clean_import_adapters import V1_CLEAN_TOOL_RISK
 A1_TOOLS = {"scan_project", "diagnose_project", "list_dir", "read_file", "file_sha256", "document_parse", "document_query"}
 A2_TOOLS = {"model_chat", "return_code", "return_analysis", "document_rewrite_plan", "dns_resolve", "protocol_adapter", "evaluate_quality_gate", "synthesize_experience_candidates", "queue_skill_candidates", "queue_tool_production_requests", "build_execution_exoskeleton", "build_shell_system_mount", "build_project_repair_plan", "build_delivery_standardization", "build_provider_adaptation", "build_learning_convergence", "build_recovery_coordination", "build_governance_execution", "build_planner_context", "build_l6_38_provider_integration", "build_l6_38_budget_snapshot", "build_l6_38_skill_integration", "build_l6_38_handoff_integration", "build_l6_38_p0_integration", "build_l6_39_memory_integration", "build_l6_39_audit_integration", "build_l6_39_recovery_integration", "build_l6_39_quality_gate_integration", "build_l6_39_p0_integration", "runtime_tool_alignment_check", "runtime_llm_operational_drill", "learning_asset_contract_guide", "learning_asset_contract_normalize", "learning_asset_contract_validate", "learning_asset_sandbox_guide", "learning_asset_sandbox_align", "learning_asset_sandbox_validate", "learning_asset_candidate_sandbox_guide", "learning_asset_candidate_sandbox_validate", "learning_asset_candidate_sandbox_review", "learning_asset_release_gate_guide", "learning_asset_release_gate_check", "learning_asset_activation_guide", "learning_asset_activation_status", "learning_asset_adapter_guide", "learning_asset_adapter_template_list", "learning_asset_adapter_template_normalize", "learning_asset_adapter_template_validate", "learning_asset_adapter_template_smoke"}
 WILDCARD_ALLOWED_PREFIXES = ("diagnose_", "scan_", "read_", "list_", "synthesize_")
-A3_TOOLS = {"write_workspace_file", "make_dir", "copy_path", "run_python_quality_check", "create_zip_package", "document_export", "document_apply_rewrite", "document_rollback", "create_release_bundle", "web_search", "network_request", "http_client", "learning_asset_candidate_sandbox_build", "learning_asset_activation_apply", "learning_asset_activation_smoke", "learning_asset_adapter_drill"}
+A3_TOOLS = {"write_workspace_file", "make_dir", "copy_path", "run_python_quality_check", "create_zip_package", "document_export", "document_apply_rewrite", "document_rollback", "create_release_bundle", "web_search", "web_download", "network_request", "http_client", "learning_asset_candidate_sandbox_build", "learning_asset_activation_apply", "learning_asset_activation_smoke", "learning_asset_adapter_drill"}
 A4_TOOLS = {"move_path", "delete_path"}
 A5_COMMAND_TERMS = {
     "rm",
@@ -197,7 +197,7 @@ class RiskClassifier:
         if tool_name == "create_release_bundle":
             return RiskLevel.A3, "受控 L6.19 标准发布包构建。"
 
-        if tool_name in {"web_search", "network_request", "http_client"}:
+        if tool_name in {"web_search", "web_download", "network_request", "http_client"}:
             return RiskLevel.A3, "受治理联网访问：仅允许 Runtime 注册表中的受控适配器执行，受协议、超时、大小和审计约束。"
 
         if tool_name == "learning_asset_candidate_sandbox_build":

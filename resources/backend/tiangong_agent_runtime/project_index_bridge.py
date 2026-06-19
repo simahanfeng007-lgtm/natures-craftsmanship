@@ -177,8 +177,11 @@ class ProjectIndexBridge:
             raise WorkspaceViolation(f"扫描路径不存在：{path}")
         if root.is_file():
             root = root.parent
+        if _is_filesystem_root(root):
+            raise WorkspaceViolation("拒绝把磁盘根目录作为项目扫描范围。请先选择具体项目目录或文件夹。")
         max_depth = max(1, min(int(max_depth or 6), 12))
         max_files = max(1, min(int(max_files or 1500), 10000))
+        max_dirs = 3000
 
         files: list[ProjectFileRecord] = []
         key_files: list[str] = []
@@ -215,6 +218,10 @@ class ProjectIndexBridge:
                     continue
                 if child.is_dir():
                     if child.name.lower() in EXCLUDED_DIRS:
+                        skipped_count += 1
+                        continue
+                    if dirs_count >= max_dirs:
+                        truncated = True
                         skipped_count += 1
                         continue
                     dirs_count += 1
@@ -307,6 +314,15 @@ def _dedupe(values: list[str]) -> list[str]:
             seen.add(value)
             result.append(value)
     return result
+
+
+def _is_filesystem_root(path: Path) -> bool:
+    try:
+        resolved = path.expanduser().resolve()
+    except OSError:
+        resolved = path
+    anchor = Path(resolved.anchor) if resolved.anchor else None
+    return bool(anchor and resolved == anchor)
 
 
 def _is_sensitive(path: Path) -> bool:

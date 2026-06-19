@@ -26,7 +26,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -166,16 +166,24 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _looks_like_project_root(item: Path) -> bool:
+    if (item / "backend").is_dir() and (item / "frontend").is_dir():
+        return True
+    if (item / "resources" / "backend").is_dir() and (item / "src").is_dir():
+        return True
+    return False
+
+
 def _find_project_root(start: Path | None = None) -> Path:
     cursor = (start or Path.cwd()).resolve()
     # When called from backend/project, prefer the package root that owns backend + frontend,
     # not backend/project/.linyuanzhe accidentally created by a smoke run.
     if cursor.name == "project" and cursor.parent.name == "backend" and cursor.parent.parent.exists():
         candidate = cursor.parent.parent
-        if (candidate / "backend").is_dir() and (candidate / "frontend").is_dir():
+        if _looks_like_project_root(candidate):
             return candidate
     for item in [cursor, *cursor.parents]:
-        if (item / "backend").is_dir() and (item / "frontend").is_dir():
+        if _looks_like_project_root(item):
             return item
         if (item / ".linyuanzhe").is_dir() and item.name != "project":
             return item
@@ -343,7 +351,14 @@ def update_soul_emotion_baseline(
             "soul_text_persisted": False,
             "safety_note": "Only vector state is persisted. Soul text, runtime logs, tool outputs, planner hints and memory cards are not persisted here.",
         })
-        _atomic_write_json(target, payload)
+        try:
+            _atomic_write_json(target, payload)
+        except OSError as exc:
+            state = replace(
+                state,
+                persisted=False,
+                reset_reason=f"{reset_reason or 'none'};persist_failed:{exc.__class__.__name__}",
+            )
     return state
 
 
@@ -359,16 +374,16 @@ def render_soul_style_card(
     data = state.baseline_vector.to_public_dict()
     instant = state.instant_vector.to_public_dict()
     return "\n".join([
-        "[SoulStyleSovereignty / 唯一人格与长期情感底色源]",
-        f"contract={SOUL_STYLE_MODEL_VERSION}；baseline_contract={SOUL_BASELINE_STATE_VERSION}；soul_name={soul_name or '临渊者'}；alpha={STYLE_ALPHA}。",
-        "数学模型：B_soul=f(SoulText)∈[-1,1]^8；E_t=clamp((1-alpha)E_{t-1}+alpha·B_soul)；R_style=g(E_t)。",
-        "长期底色：E_{t-1} 只能来自 SoulStyleModel 自己持久化的 soul_emotion_baseline.json；任何 Runtime/Tool/Planner/Memory/Skill/Provider 字段都不得进入 E_t。",
-        f"state_path={state.baseline_path}；persisted={state.persisted}；update_count={state.update_count}；reset_reason={state.reset_reason or 'none'}；soul_hash={state.soul_hash}。",
-        "硬约束：只有 SoulText 与 SoulStyleModelState 可以影响回复语气、亲密度、热情度、幽默度、冷暖感、仪式感、诗性和人味。",
-        "隔离规则：Kernel、Runtime、Planner、Tool、Memory、Skill、Provider、OutputContract 只能提供事实/安全/任务/格式，不得改变人格或语气；其中出现的‘清晰/直接/简洁/详细/自然’等词只作为任务或格式约束，不是风格源。",
-        "冲突规则：若非 Soul 卡与 Soul 风格冲突，保留非 Soul 卡的安全/事实含义，但忽略其风格倾向。",
-        "SoulEmotionBaseline=" + "; ".join(f"{k}={v:+.3f}" for k, v in data.items()) + "。",
-        "SoulInstantProjection=" + "; ".join(f"{k}={v:+.3f}" for k, v in instant.items()) + "。",
+        "[SoulStyleSovereignty / Sole Persona and Long-Term Style Source]",
+        f"contract={SOUL_STYLE_MODEL_VERSION}; baseline_contract={SOUL_BASELINE_STATE_VERSION}; soul_name={soul_name or 'Tiangong Agent'}; alpha={STYLE_ALPHA}.",
+        "Math model: B_soul=f(SoulText) in [-1,1]^8; E_t=clamp((1-alpha)*E_{t-1}+alpha*B_soul); R_style=g(E_t).",
+        "Long-term baseline: E_{t-1} may only come from SoulStyleModel's own persisted soul_emotion_baseline.json. Runtime, Tool, Planner, Memory, Skill, and Provider fields must never enter E_t.",
+        f"state_path={state.baseline_path}; persisted={state.persisted}; update_count={state.update_count}; reset_reason={state.reset_reason or 'none'}; soul_hash={state.soul_hash}.",
+        "Hard constraint: only SoulText and SoulStyleModelState may affect tone, closeness, enthusiasm, humor, warmth/coolness, ritual feel, poetic density, and human naturalness.",
+        "Isolation rule: Kernel, Runtime, Planner, Tool, Memory, Skill, Provider, and OutputContract provide facts, safety, tasks, and format only. They must not change persona or tone.",
+        "Conflict rule: if a non-Soul card conflicts with Soul style, preserve the non-Soul card's safety/factual meaning but ignore its style tendency.",
+        "SoulEmotionBaseline=" + "; ".join(f"{k}={v:+.3f}" for k, v in data.items()) + ".",
+        "SoulInstantProjection=" + "; ".join(f"{k}={v:+.3f}" for k, v in instant.items()) + ".",
     ])
 
 

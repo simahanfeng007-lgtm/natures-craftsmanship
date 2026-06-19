@@ -88,7 +88,7 @@ function metric(label, value, hint = "") {
 function renderLearningStatus(runtimeStatus, refs) {
   const payload = runtimeStatus?.payload || {};
   const learning = payload.learning || {};
-  const pool = learning.jingyan_chi || {};
+  const pool = learning.learning_cards || {};
   const skillQueue = learning.skill_queue || {};
   const toolRequests = learning.tool_requests || {};
   const latest = Array.isArray(pool.latest) ? pool.latest : [];
@@ -99,7 +99,7 @@ function renderLearningStatus(runtimeStatus, refs) {
   refs.pill.textContent = runtimeStatus?.loading ? "读取中" : statusText(status);
   refs.pill.className = pillClass(status, pending, failed);
   refs.grid.innerHTML = [
-    metric("经验池", numberValue(pool.total), "已接入"),
+    metric("学习卡", numberValue(pool.total), "已接入"),
     metric("待学习", pending),
     metric("已生成候选", numberValue(pool.candidate_ready)),
     metric("已学习", numberValue(pool.learned) + numberValue(pool.learned_no_asset)),
@@ -118,7 +118,7 @@ function renderLearningStatus(runtimeStatus, refs) {
   if (!latest.length) {
     const empty = document.createElement("div");
     empty.className = "history-empty";
-    empty.textContent = "暂无经验池记录。";
+    empty.textContent = "暂无学习卡记录。";
     refs.list.appendChild(empty);
     return;
   }
@@ -128,6 +128,7 @@ function renderLearningStatus(runtimeStatus, refs) {
     row.className = "side-learning-row";
     const summary = item.summary || item.task_preview || item.learning_result || "暂无学习摘要";
     const labels = [
+      item.priority ? `优先级：${item.priority}${Number.isFinite(Number(item.priority_score)) ? ` / ${item.priority_score}` : ""}` : "",
       sourceText(item.source),
       item.has_skill ? `技能：${item.skill_name || "已生成"}` : "",
       item.has_tool ? `工具：${item.tool_name || "已生成"}` : "",

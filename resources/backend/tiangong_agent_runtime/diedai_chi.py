@@ -14,8 +14,20 @@ from pathlib import Path
 from typing import Any
 
 
-DIEDAI_CHI_LUJING = Path.home() / ".tiangong" / "diedai" / "diedai_chi.jsonl"
-QIANDUAN_TOUYING_LUJING = Path.home() / ".tiangong" / "diedai" / "qianduan_touying.json"
+def _state_root() -> Path:
+    raw = (
+        os.environ.get("TIANGONG_JIA")
+        or os.environ.get("LINYUANZHE_STATE_DIR")
+        or os.environ.get("TIANGONG_STATE_DIR")
+        or os.environ.get("TIANGONG_PACKAGE_STATE_DIR")
+        or os.environ.get("HERMES_HOME")
+        or ""
+    )
+    return Path(raw).expanduser() if raw else Path.home() / ".tiangong"
+
+
+DIEDAI_CHI_LUJING = _state_root() / "diedai" / "diedai_chi.jsonl"
+QIANDUAN_TOUYING_LUJING = _state_root() / "diedai" / "qianduan_touying.json"
 
 
 def _zhaichao(text: str, limit: int = 200) -> str:

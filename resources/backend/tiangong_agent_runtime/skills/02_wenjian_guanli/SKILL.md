@@ -1,5 +1,18 @@
 # 文件管理
 
+## 工具
+
+- `list_dir`
+- `scan_project`
+- `read_file`
+- `workspace_text_search`
+- `file_sha256`
+- `write_workspace_file`
+- `make_dir`
+- `move_path`
+- `copy_path`
+- `delete_path`
+
 ## 1. 定位
 文件管理是临渊者执行链的入口级Skill。负责建立路径事实、识别项目结构、读取目标文件、搜索证据片段、计算文件哈希、受控写入，为文档处理、代码诊断、终端执行、打包、收口质检提供可靠文件上下文。
 

@@ -28,9 +28,30 @@ from tiangong_kernel.l0_primitives.risk import RiskLevel, RiskRef
 from tiangong_kernel.l0_primitives.time import Timestamp
 from tiangong_kernel.l0_primitives.transaction import TransactionKind, TransactionRef, TransactionState
 
+try:
+    from .codex_tool_specs import (
+        codex_default_substep,
+        codex_inspect_tools,
+        codex_quality_tools,
+        codex_readback_tools,
+        codex_write_tools,
+    )
+except ImportError:  # pragma: no cover - supports direct script-style imports
+    from codex_tool_specs import (  # type: ignore
+        codex_default_substep,
+        codex_inspect_tools,
+        codex_quality_tools,
+        codex_readback_tools,
+        codex_write_tools,
+    )
+
 
 SCHEMA = "tiangong.codex.structured_plan.v1"
 SUBSTEPS = ("inspect", "backup", "write", "readback", "quality", "report")
+CODEX_INSPECT_TOOLS = codex_inspect_tools()
+CODEX_WRITE_TOOLS = codex_write_tools()
+CODEX_READBACK_TOOLS = codex_readback_tools()
+CODEX_QUALITY_TOOLS = codex_quality_tools()
 SUBSTEP_WEIGHTS = {
     "inspect": 0.20,
     "backup": 0.05,
@@ -311,13 +332,15 @@ class CodeXProgressEvaluator:
         normalized_substep = self._normalize_substep(substep, tool_name)
         if ok:
             state.substeps[normalized_substep] = max(state.substeps.get(normalized_substep, 0.0), 1.0)
-            if tool_name in {"write_file", "replace_lines"}:
+            if tool_name in CODEX_WRITE_TOOLS:
                 state.substeps["write"] = 1.0
-            if tool_name in {"read_file", "glob", "grep", "list_dir"} and normalized_substep == "inspect":
+                if self._has_rollback_evidence(tool_name, output):
+                    state.substeps["backup"] = 1.0
+            if tool_name in CODEX_INSPECT_TOOLS and normalized_substep == "inspect":
                 state.substeps["inspect"] = 1.0
-            if tool_name == "read_file" and state.substeps.get("write", 0.0) > 0:
+            if tool_name in CODEX_READBACK_TOOLS and state.substeps.get("write", 0.0) > 0:
                 state.substeps["readback"] = 1.0
-            if tool_name in {"python_quality_runner", "code_quality_runner"}:
+            if tool_name in CODEX_QUALITY_TOOLS:
                 state.substeps["quality"] = 1.0
         else:
             state.failures += 1
@@ -331,7 +354,7 @@ class CodeXProgressEvaluator:
         state.summary = self._summary(tool_name, ok, output)
         evidence = EvidenceRef(
             _digest_ref("codexevid", self.plan.plan_ref, step_id, self._event_count, tool_name, ok),
-            kind=EvidenceKind.TEST_RESULT_EVIDENCE if tool_name in {"python_quality_runner", "code_quality_runner"} else EvidenceKind.TOOL_OUTPUT_EVIDENCE,
+            kind=EvidenceKind.TEST_RESULT_EVIDENCE if tool_name in CODEX_QUALITY_TOOLS else EvidenceKind.TOOL_OUTPUT_EVIDENCE,
             state=EvidenceState.VERIFIED if ok else EvidenceState.QUESTIONED,
         )
         state.evidence_refs.append(evidence.value.value)
@@ -348,6 +371,40 @@ class CodeXProgressEvaluator:
                 state.status = "done" if state.score >= 0.72 else state.status
                 if summary:
                     state.summary = _short_text(summary, 220)
+        return self.snapshot()
+
+    def restore_snapshot(self, snapshot: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(snapshot, dict):
+            return self.snapshot()
+        for item in snapshot.get("steps") or []:
+            if not isinstance(item, dict):
+                continue
+            step_id = _short_text(item.get("step_id"), 48)
+            if step_id not in self._evals:
+                continue
+            state = self._evals[step_id]
+            substeps = item.get("substeps") if isinstance(item.get("substeps"), dict) else {}
+            for name in SUBSTEPS:
+                state.substeps[name] = _clamp(substeps.get(name, state.substeps.get(name, 0.0)))
+            state.status = _short_text(item.get("status") or state.status, 40)
+            state.failures = int(item.get("failures") or state.failures or 0)
+            state.tool_events = int(item.get("tool_events") or state.tool_events or 0)
+            state.confidence = _clamp(item.get("confidence"), 0.0, 1.0)
+            state.score = _clamp(item.get("score"), 0.0, 1.0)
+            state.risk_penalty = _clamp(item.get("risk_penalty"), 0.0, 1.0)
+            state.summary = _short_text(item.get("summary") or state.summary, 220)
+            if isinstance(item.get("evidence_refs"), list):
+                state.evidence_refs = _list_text(item.get("evidence_refs"), limit=24)
+            if isinstance(item.get("metrics"), dict):
+                state.metrics = {
+                    _short_text(key, 80): _clamp(value)
+                    for key, value in item.get("metrics", {}).items()
+                }
+        active = _short_text(snapshot.get("active_step_id"), 48)
+        if active in self._evals:
+            self._active_step = active
+        else:
+            self._advance_active_step()
         return self.snapshot()
 
     def snapshot(self) -> dict[str, Any]:
@@ -404,15 +461,15 @@ class CodeXProgressEvaluator:
         }
         if value in aliases:
             return aliases[value]
-        if tool_name in {"glob", "grep", "list_dir"}:
+        if tool_name in CODEX_INSPECT_TOOLS:
             return "inspect"
-        if tool_name in {"write_file", "replace_lines"}:
+        if tool_name in CODEX_WRITE_TOOLS:
             return "write"
-        if tool_name == "read_file":
+        if tool_name in CODEX_READBACK_TOOLS:
             return "readback"
-        if tool_name in {"python_quality_runner", "code_quality_runner"}:
+        if tool_name in CODEX_QUALITY_TOOLS:
             return "quality"
-        return "inspect"
+        return codex_default_substep(tool_name, "inspect")
 
     def _score(self, state: StepEvaluation) -> float:
         return _clamp(sum(state.substeps.get(name, 0.0) * weight for name, weight in SUBSTEP_WEIGHTS.items()))
@@ -421,8 +478,15 @@ class CodeXProgressEvaluator:
         step = self._by_step.get(step_id)
         base = RISK_PENALTY.get((step.risk_level if step else "A2").upper(), 0.02)
         failure_penalty = min(0.30, state.failures * 0.06)
+        missing_backup = 0.06 if state.substeps.get("write", 0.0) and not state.substeps.get("backup", 0.0) else 0.0
         missing_verify = 0.08 if state.substeps.get("write", 0.0) and not state.substeps.get("quality", 0.0) else 0.0
-        return _clamp(base + failure_penalty + missing_verify)
+        return _clamp(base + failure_penalty + missing_backup + missing_verify)
+
+    def _has_rollback_evidence(self, tool_name: str, output: str = "") -> bool:
+        text = str(output or "").lower()
+        if tool_name == "rollback_ops" and '"ok": true' in text:
+            return True
+        return "rollback_ref" in text or "transaction_id" in text or "rollback attempted" in text
 
     def _confidence(self, state: StepEvaluation) -> float:
         verified = (

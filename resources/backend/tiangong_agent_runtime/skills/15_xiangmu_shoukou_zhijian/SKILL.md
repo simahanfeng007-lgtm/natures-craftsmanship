@@ -1,5 +1,16 @@
 # 项目收口质检
 
+## 工具
+
+- `scan_project`
+- `run_python_quality_check`
+- `run_python_tests`
+- `diagnose_project`
+- `evaluate_quality_gate`
+- `runtime_tool_alignment_check`
+- `build_delivery_standardization`
+- `return_analysis`
+
 ## 1. 定位
 项目收口质检是交付前最后一道质量门。不替代代码诊断、文件管理、终端执行、项目打包，而是把它们的检查结果统一裁决为：通过 / 部分通过 / 不通过 / 禁止发布。覆盖项目结构、语法测试、关键路径smoke、工具对齐、打包完整性、运行时完整性、P0-P3风险分级和最终交付报告。
 

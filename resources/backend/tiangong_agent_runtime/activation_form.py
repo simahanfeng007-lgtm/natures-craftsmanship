@@ -66,6 +66,7 @@ class ActivationFormDecider:
         aliases: list[str] = []
         mapping = (
             ("创建", "write file"),
+            ("保存", "save file"),
             ("写入", "write file"),
             ("改写", "write file"),
             ("修改", "edit file"),
@@ -85,6 +86,8 @@ class ActivationFormDecider:
             ("验证", "verify"),
             ("目录", "directory"),
             ("文件", "file"),
+            ("网页下载", "web download"),
+            ("下载网页", "web download"),
             ("代码", "code .py"),
             ("项目", "project"),
             ("桌面", "desktop"),
@@ -147,13 +150,16 @@ class ActivationFormDecider:
         hard_markers = (
             "read", "list", "create", "write", "modify", "edit", "run", "test",
             "package", "repair", "fix", "verify", "inspect directory", "open file",
-            "读取", "列出", "创建", "写入", "修改", "编辑", "运行", "测试",
-            "打包", "修复", "验证", "整理", "移动", "复制", "删除",
+            "download", "save",
+            "读取", "列出", "创建", "保存", "写入", "修改", "编辑", "运行", "测试",
+            "打包", "修复", "验证", "整理", "移动", "复制", "删除", "下载",
         )
         local_objects = (
             "目录", "文件", "代码", "项目", "桌面", "下载", "路径", "脚本", ".py",
             ".txt", ".md", ".json", ".yml", ".yaml", ".toml", "zip", "pytest",
+            "网页", "链接", "url", "http",
             "folder", "file", "directory", "project", "desktop", "downloads", "script",
+            "web", "link",
         )
         consult_only_markers = (
             "为什么", "怎么回事", "什么意思", "解释", "分析", "风险", "方案",
@@ -178,6 +184,9 @@ class ActivationFormDecider:
         if any(marker in text for marker in ("代码", "code", "pytest", "test", "测试")):
             work_type = "code"
             required = ("file_read", "terminal_test")
+        elif any(marker in text for marker in ("下载", "download", "网页", "url", "http", "链接")):
+            work_type = "web"
+            required = ("web_download", "file_write")
         elif any(marker in text for marker in ("run", "运行", "命令", "打包", "package")):
             work_type = "terminal"
             required = ("terminal",)

@@ -26,9 +26,8 @@ L6 插件/技能 (l6_plugins)：各类插件
 - 代码系统路径 → CodeXSubsystem (llm_codex.py)
 - 文件执行路径 → PlanBridge + ExecutionSpine
 
-### 3.2 自由意志系统
-- free_will_suiji_yinqing.py：随机动作引擎
-- free_will_learning_chain.py：自学链
+### 3.2 自主学习与迭代系统
+- autonomous_learning_pipeline.py：唯一学习卡队列与自学状态机
 - self_learning_route.py：自学路由
 - self_iteration_route.py：自迭代路由
 

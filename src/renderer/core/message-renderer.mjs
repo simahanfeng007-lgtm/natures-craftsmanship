@@ -1,6 +1,6 @@
-const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "avif"]);
-const VIDEO_EXTENSIONS = new Set(["mp4", "webm", "ogv", "mov"]);
-const AUDIO_EXTENSIONS = new Set(["mp3", "wav", "ogg", "m4a", "flac"]);
+const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "avif", "tif", "tiff"]);
+const VIDEO_EXTENSIONS = new Set(["mp4", "webm", "ogv", "mov", "mkv", "avi", "m4v", "wmv", "flv", "mpeg", "mpg", "3gp", "ts", "m2ts"]);
+const AUDIO_EXTENSIONS = new Set(["mp3", "wav", "ogg", "m4a", "flac", "aac", "opus", "wma"]);
 const URL_RE = /https?:\/\/[^\s<>()]+/i;
 const WINDOWS_PATH_RE = /^[a-zA-Z]:[\\/][^\n\r<>"]+$/;
 const FILE_URL_RE = /^file:\/\/\/?/i;
@@ -56,6 +56,84 @@ function mediaKind(value) {
   if (VIDEO_EXTENSIONS.has(ext)) return "video";
   if (AUDIO_EXTENSIONS.has(ext)) return "audio";
   return "";
+}
+
+function buttonState(button, text, resetText = "") {
+  if (!button) return;
+  const original = resetText || button.dataset.defaultText || button.textContent || "";
+  button.textContent = text;
+  window.setTimeout(() => {
+    button.textContent = original;
+  }, 1400);
+}
+
+async function copyMediaTarget(target, kind, copyAs, button) {
+  const runtime = window.tiangongRuntime;
+  try {
+    if (runtime?.copyMedia) {
+      const result = await runtime.copyMedia({ target, kind, copyAs });
+      if (result?.ok || result?.copiedAs) {
+        const copiedAs = String(result.copiedAs || copyAs || "");
+        if (copiedAs === "image") buttonState(button, "已复制图片");
+        else if (copiedAs === "file") buttonState(button, "已复制文件");
+        else if (copiedAs === "url") buttonState(button, "已复制链接");
+        else buttonState(button, "已复制路径");
+        return;
+      }
+      buttonState(button, "复制失败");
+      return;
+    }
+    await navigator.clipboard.writeText(String(target || ""));
+    buttonState(button, "已复制路径");
+  } catch {
+    buttonState(button, "复制失败");
+  }
+}
+
+async function openMediaTarget(target, button) {
+  const runtime = window.tiangongRuntime;
+  try {
+    if (runtime?.openPath) {
+      const result = await runtime.openPath(target);
+      if (result?.ok) {
+        buttonState(button, "已打开");
+        return;
+      }
+    }
+    const href = normalizeUrl(target, { media: true });
+    if (href) window.open(href, "_blank", "noreferrer");
+    buttonState(button, "已打开");
+  } catch {
+    buttonState(button, "打开失败");
+  }
+}
+
+function createMediaActions(target, kind, compact = false) {
+  const actions = create(compact ? "span" : "div", compact ? "md-media-actions compact" : "md-media-actions");
+  if (kind === "image") {
+    const copyMedia = create("button", "md-media-action");
+    copyMedia.type = "button";
+    copyMedia.dataset.defaultText = "复制图片";
+    copyMedia.textContent = "复制图片";
+    copyMedia.addEventListener("click", () => copyMediaTarget(target, kind, "media", copyMedia));
+    actions.appendChild(copyMedia);
+  }
+
+  const copyPath = create("button", "md-media-action");
+  copyPath.type = "button";
+  copyPath.dataset.defaultText = kind === "video" ? "复制视频路径" : kind === "audio" ? "复制音频路径" : "复制路径";
+  copyPath.textContent = copyPath.dataset.defaultText;
+  copyPath.addEventListener("click", () => copyMediaTarget(target, kind, "path", copyPath));
+
+  const open = create("button", "md-media-action");
+  open.type = "button";
+  open.dataset.defaultText = "打开";
+  open.textContent = "打开";
+  open.addEventListener("click", () => openMediaTarget(target, open));
+
+  actions.appendChild(copyPath);
+  actions.appendChild(open);
+  return actions;
 }
 
 function trimTrailingUrlPunctuation(value) {
@@ -129,11 +207,14 @@ function appendInline(parent, text) {
       if (parsed) {
         const src = normalizeUrl(parsed.target, { media: true });
         if (src) {
+          const wrap = create("span", "md-inline-media");
           const img = create("img", "md-inline-image");
           img.src = src;
           img.alt = parsed.label || "";
           img.loading = "lazy";
-          parent.appendChild(img);
+          wrap.appendChild(img);
+          wrap.appendChild(createMediaActions(parsed.target, "image", true));
+          parent.appendChild(wrap);
         } else {
           appendText(parent, source.slice(index, parsed.end));
         }
@@ -314,7 +395,7 @@ function appendQuote(parent, lines) {
   parent.appendChild(quote);
 }
 
-function appendMedia(parent, value) {
+function appendMedia(parent, value, options = {}) {
   const src = normalizeUrl(value, { media: true });
   const kind = mediaKind(value);
   if (!src || !kind) return false;
@@ -336,11 +417,16 @@ function appendMedia(parent, value) {
     audio.controls = true;
     figure.appendChild(audio);
   }
+  figure.appendChild(createMediaActions(value, kind));
   const caption = create("figcaption", "md-media-caption");
-  caption.textContent = value;
+  caption.textContent = options.caption || value;
   figure.appendChild(caption);
   parent.appendChild(figure);
   return true;
+}
+
+export function renderMediaAttachment(container, value, options = {}) {
+  return appendMedia(container, value, options);
 }
 
 function appendFileLink(parent, value) {

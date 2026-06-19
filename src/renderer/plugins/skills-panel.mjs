@@ -122,8 +122,18 @@ export const skillsPanelPlugin = {
       return category === "all" ? abilities : abilities.filter((item) => item.category === category);
     }
 
+    function abilityKey(ability) {
+      return String(ability?.id || ability?.name || "").trim();
+    }
+
+    function selectedSkillIds() {
+      return new Set(safeArray(state.snapshot().selectedSkills).map((item) => String(item.id || item.name || "").toLowerCase()));
+    }
+
     function renderAbility(ability) {
       const tone = statusClass(ability);
+      const id = abilityKey(ability);
+      const selected = selectedSkillIds().has(id.toLowerCase());
       const toolRefs = safeArray(ability.toolPackageRefs);
       const toolNames = safeArray(ability.toolNames);
       const toolSummary = toolNames.length
@@ -134,13 +144,17 @@ export const skillsPanelPlugin = {
       const risk = ability.riskLevel || ability.maxDangerLevel || (ability.requiresConfirmation ? "需确认" : "常规");
       const toolRefCount = Math.max(toolRefs.length, toolNames.length);
       return `
-        <article class="skill-card ${escHtml(tone)}">
+        <article class="skill-card ${escHtml(tone)}${selected ? " selected" : ""}" data-skill-id="${escHtml(id)}">
           <div class="skill-card-head">
             <div>
               <strong>${escHtml(ability.name || ability.id || "未命名能力包")}</strong>
               <span>${escHtml(ability.id || "未记录 ID")}</span>
             </div>
             <span class="mini-pill ${escHtml(tone)}">${escHtml(statusLabel(ability.status))}</span>
+            <label class="skill-select-control" title="启用此技能">
+              <input type="checkbox" data-select-skill="${escHtml(id)}" ${selected ? "checked" : ""} />
+              <span>启用</span>
+            </label>
           </div>
           <p class="skill-desc">${escHtml(ability.description || "暂无能力说明")}</p>
           <div class="skill-meta-grid">
@@ -216,8 +230,18 @@ export const skillsPanelPlugin = {
     }
 
     refreshButton.addEventListener("click", () => refreshSkills());
+    listEl.addEventListener("change", (event) => {
+      const input = event.target.closest("[data-select-skill]");
+      if (!input) return;
+      const id = input.dataset.selectSkill || "";
+      const ability = safeArray(catalog.abilities).find((item) => abilityKey(item) === id);
+      if (!ability) return;
+      actions.toggleSelectedSkill?.(ability);
+      render();
+    });
     state.on("page", renderPage);
     state.on("skillCategory", render);
+    state.on("selectedSkills", render);
 
     renderPage(state.snapshot().activePage);
     render();

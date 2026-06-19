@@ -12,6 +12,8 @@ export const workspaceBlockPlugin = {
           <div class="section-heading">
             <span>工作区</span>
             <button id="workspaceButton" class="small-command" type="button">选择</button>
+            <button id="workspaceCDrive" class="small-command" type="button" title="切到 C 盘根目录">C:</button>
+            <button id="workspaceDDrive" class="small-command" type="button" title="切到 D 盘根目录">D:</button>
           </div>
           <div id="workspaceText" class="path-display">读取中</div>
         </section>
@@ -19,6 +21,8 @@ export const workspaceBlockPlugin = {
     );
 
     const button = slot.querySelector("#workspaceButton");
+    const cDriveButton = slot.querySelector("#workspaceCDrive");
+    const dDriveButton = slot.querySelector("#workspaceDDrive");
     const text = slot.querySelector("#workspaceText");
     const section = button.closest(".side-section");
 
@@ -32,6 +36,8 @@ export const workspaceBlockPlugin = {
     }
 
     button.addEventListener("click", () => actions.chooseWorkspace());
+    cDriveButton.addEventListener("click", () => actions.chooseWorkspaceRoot({ root: "C:\\" }));
+    dDriveButton.addEventListener("click", () => actions.chooseWorkspaceRoot({ root: "D:\\" }));
     state.on("page", renderPage);
     state.on("settings", render);
     renderPage(state.snapshot().activePage);

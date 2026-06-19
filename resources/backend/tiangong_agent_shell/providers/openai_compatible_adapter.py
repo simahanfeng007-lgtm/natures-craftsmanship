@@ -243,11 +243,22 @@ _TEXT_PARAMETER_NAME_RE = re.compile(
     r"<parameter\b[^>]*\bname=[\"']([^\"']+)[\"'][^>]*>(.*?)</parameter>",
     re.IGNORECASE | re.DOTALL,
 )
+_DSML_INVOKE_RE = re.compile(
+    r"<[^>\n]*\bDSML\b[^>\n]*\binvoke\b[^>\n]*\bname=[\"']([^\"']+)[\"'][^>\n]*>(.*?)(?=</?[^>\n]*\bDSML\b[^>\n]*\binvoke\b|<[^>\n]*\bDSML\b[^>\n]*\binvoke\b[^>\n]*\bname=|$)",
+    re.IGNORECASE | re.DOTALL,
+)
+_DSML_PARAMETER_RE = re.compile(
+    r"(<[^>\n]*\bDSML\b[^>\n]*\bparameter\b[^>\n]*\bname=[\"']([^\"']+)[\"'][^>\n]*>)(.*?)(?:</[^>\n]*\bDSML\b[^>\n]*\bparameter\b[^>\n]*>|$)",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def _parse_text_tool_calls(content: str) -> list[dict[str, Any]] | None:
     """兼容 MiMo/DeepSeek 把 function call 写进正文的 XML/JSON 外形。"""
     text = str(content or "")
+    dsml_calls = _parse_dsml_tool_calls(text)
+    if dsml_calls:
+        return dsml_calls
     blocks = [m.group(1) for m in _TEXT_TOOL_CALL_RE.finditer(text)] or [text]
 
     # 去掉无 tool_call 标签的纯文本（避免把普通 JSON 误解析）
@@ -279,6 +290,63 @@ def _parse_text_tool_calls(content: str) -> list[dict[str, Any]] | None:
                 },
             })
     return calls or None
+
+
+def _parse_dsml_tool_calls(text: str) -> list[dict[str, Any]] | None:
+    if "DSML" not in str(text or "").upper():
+        return None
+    calls: list[dict[str, Any]] = []
+    for match in _DSML_INVOKE_RE.finditer(str(text or "")):
+        name = _safe_tool_name(match.group(1))
+        if not name:
+            continue
+        body = match.group(2) or ""
+        args: dict[str, Any] = {}
+        for param in _DSML_PARAMETER_RE.finditer(body):
+            key = _safe_argument_name(param.group(2))
+            if key:
+                args[key] = _coerce_dsml_argument(param.group(1), param.group(3))
+        calls.append({
+            "id": f"dsml_call_{len(calls) + 1}",
+            "type": "function",
+            "function": {
+                "name": name,
+                "arguments": json.dumps(args, ensure_ascii=False),
+            },
+        })
+    return calls or None
+
+
+def _coerce_dsml_argument(attrs: str, value: Any) -> Any:
+    text = html.unescape(_strip_xml_text(value))
+    attr_text = str(attrs or "").lower()
+    if re.search(r"\b(?:bool|boolean)\s*=\s*[\"']true[\"']", attr_text):
+        return text.strip().lower() in {"1", "true", "yes", "y", "on"}
+    if re.search(r"\b(?:int|integer)\s*=\s*[\"']true[\"']", attr_text):
+        try:
+            return int(text)
+        except ValueError:
+            return text
+    if re.search(r"\b(?:num|number|float)\s*=\s*[\"']true[\"']", attr_text):
+        try:
+            return float(text)
+        except ValueError:
+            return text
+    if re.search(r"\bstring\s*=\s*[\"']false[\"']", attr_text):
+        lowered = text.strip().lower()
+        if lowered in {"true", "false"}:
+            return lowered == "true"
+        if re.fullmatch(r"-?\d+", text.strip()):
+            try:
+                return int(text)
+            except ValueError:
+                return text
+        if re.fullmatch(r"-?\d+\.\d+", text.strip()):
+            try:
+                return float(text)
+            except ValueError:
+                return text
+    return text
 
 
 def _parse_json_tool_calls(block: str) -> list[dict[str, Any]] | None:

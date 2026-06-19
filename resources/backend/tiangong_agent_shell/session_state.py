@@ -24,8 +24,15 @@ _HUIHUA_MULU = "sessions"
 
 
 def _tiangong_jia() -> Path:
-    """天工家目录：TIANGONG_JIA 环境变量优先，回退 ~/.tiangong。"""
-    jia = os.environ.get("TIANGONG_JIA") or os.environ.get("HERMES_HOME") or ""
+    """天工家目录：优先使用桌面包注入的动态本体状态目录。"""
+    jia = (
+        os.environ.get("TIANGONG_JIA")
+        or os.environ.get("LINYUANZHE_STATE_DIR")
+        or os.environ.get("TIANGONG_STATE_DIR")
+        or os.environ.get("TIANGONG_PACKAGE_STATE_DIR")
+        or os.environ.get("HERMES_HOME")
+        or ""
+    )
     if jia:
         return Path(jia)
     return Path.home() / ".tiangong"

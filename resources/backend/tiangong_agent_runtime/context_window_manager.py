@@ -8,6 +8,14 @@ from typing import Any, Iterable
 
 from .context_pack_schema import ContextPack, ContextWindowBundle, json_safe, safe_text
 
+try:
+    from .codex_tool_specs import codex_tool_names, codex_tool_usage_cards
+except ImportError:  # pragma: no cover - supports direct script-style imports
+    from codex_tool_specs import codex_tool_names, codex_tool_usage_cards  # type: ignore
+
+_CODEX_TOOL_USAGE_CARDS = codex_tool_usage_cards()
+_CODEX_TOOL_NAMES = codex_tool_names()
+
 _TOOL_USAGE_CARDS: dict[str, str] = {
     "list_dir": "列出工作区内目录。args: {path}。只读。",
     "read_file": "读取工作区内普通文件摘要。args: {path}。只读，不读凭证文件。",
@@ -33,15 +41,17 @@ _TOOL_USAGE_CARDS: dict[str, str] = {
     "return_code": "返回代码文本，不直接写盘。args: {content,language}。",
 }
 
+_TOOL_USAGE_CARDS.update(_CODEX_TOOL_USAGE_CARDS)
+
 _FAMILY_TOOL_PREFIXES: dict[str, tuple[str, ...]] = {
     "file": ("list_dir", "read_file", "file_sha256", "write_workspace_file", "make_dir", "move_path", "copy_path", "delete_path"),
     "document": ("document_",),
-    "code": ("scan_project", "diagnose_project", "run_python_quality_check", "code_x_"),
-    "terminal": ("run_python_quality_check",),
+    "code": ("scan_project", "diagnose_project", "run_python_quality_check", "code_x_", *_CODEX_TOOL_NAMES),
+    "terminal": ("run_python_quality_check", "bash", "dependency_probe"),
     "delivery": ("create_zip_package", "create_release_bundle", "build_delivery_"),
-    "quality": ("run_python_quality_check", "evaluate_quality_gate"),
+    "quality": ("run_python_quality_check", "evaluate_quality_gate", "python_quality_runner", "code_quality_runner", "browser_verify", "frontend_devserver"),
     "analysis": ("return_analysis", "return_code", "diagnose_project"),
-    "web": ("web_", "search_"),
+    "web": ("web_", "search_", "frontend_devserver", "browser_verify"),
 }
 
 

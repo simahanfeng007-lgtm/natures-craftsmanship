@@ -3,6 +3,7 @@ import {
   formatElapsedMs,
   humanizeBackendText,
   parseBackendSteps,
+  permissionNames,
   spokenBackendText,
   stripStreamEvents,
   stripStatusPayload,
@@ -78,24 +79,17 @@ function tasksFromStatus(runtimeStatus) {
     });
   }
 
-  const learning = payload.learning?.jingyan_chi || {};
-  for (const item of safeArray(learning.latest).slice(0, 6)) {
-    tasks.push({
-      tool: item.has_skill ? "技能学习候选" : item.has_tool ? "工具生产请求" : "经验学习",
-      status: normalizeTaskStatus(item.status),
-      summary: compactText(item.task_preview || item.summary || item.learning_result || "等待学习链处理。", 420)
-    });
-  }
-
   return tasks;
 }
 
 function combinedTasks(run, runtimeStatus) {
-  const parsed = parseBackendSteps(run?.stdout || "").map((step) => ({
-    tool: step.tool,
-    status: normalizeTaskStatus(step.status),
-    summary: step.summary
-  }));
+  const parsed = parseBackendSteps(run?.stdout || "")
+    .map((step) => ({
+      tool: step.tool,
+      status: normalizeTaskStatus(step.status),
+      summary: step.summary
+    }))
+    .filter((task) => !isBackgroundPostprocessTask(task));
   const fromRun = taskFromRun(run);
   const tasks = [...(fromRun ? [fromRun] : []), ...parsed, ...tasksFromStatus(runtimeStatus)];
   const seen = new Set();
@@ -156,7 +150,26 @@ function includesAny(text, tokens) {
   return tokens.some((token) => lower.includes(String(token).toLowerCase()));
 }
 
+function isBackgroundPostprocessTask(task) {
+  const raw = `${task?.tool || ""} ${task?.summary || ""}`;
+  return includesAny(raw, [
+    "_hou_chuli",
+    "postprocess",
+    "后处理",
+    "经验合成",
+    "经验学习",
+    "自主学习",
+    "技能学习",
+    "工具生产",
+    "晋升",
+    "遗忘"
+  ]);
+}
+
 function taskFamily(task) {
+  if (String(task?.tool || "") === "最近执行") {
+    return { key: "recent", title: "最近执行" };
+  }
   const raw = `${task.tool || ""} ${task.summary || ""}`;
   if (includesAny(raw, ["_hebing_panding", "合并判定", "能力路由", "chat/work", "ModelPlanner", "PlanBridge", "Planner"])) {
     return { key: "route", title: "合并判定与能力路由" };
@@ -947,7 +960,7 @@ export const inspectorPanelPlugin = {
         meta.textContent = [
           run.code !== "" && run.code !== undefined ? `退出码 ${run.code}` : null,
           run.elapsedMs ? `耗时 ${formatElapsedMs(run.elapsedMs)}` : null,
-          run.mode ? `模式 ${translateValue(run.mode)}` : null,
+          `权限 ${permissionNames[snap.settings?.permissionMode || run.permissionMode || "workspace_full"] || translateValue(snap.settings?.permissionMode || run.permissionMode || "workspace_full")}`,
           runtimeStatus.payload?.pending_confirmations ? `待确认 ${runtimeStatus.payload.pending_confirmations}` : null
         ].filter(Boolean).join("  ·  ");
         return;
@@ -957,7 +970,7 @@ export const inspectorPanelPlugin = {
       status.className = `run-pill ${runtimeStatus?.loading ? "running" : runtimeStatus?.ok === false ? "failed" : runtimeStatus?.ok === true ? "ok" : ""}`;
       meta.textContent = [
         snap.settings?.workspace ? concisePath(snap.settings.workspace) : "未设置工作区",
-        snap.settings?.mode ? `模式 ${translateValue(snap.settings.mode)}` : null,
+        `权限 ${permissionNames[snap.settings?.permissionMode || "workspace_full"] || translateValue(snap.settings?.permissionMode || "workspace_full")}`,
         runtimeStatus.payload?.model ? `模型 ${runtimeStatus.payload.model}` : null
       ].filter(Boolean).join("  ·  ");
     }
@@ -1005,7 +1018,7 @@ export const inspectorPanelPlugin = {
           "路由概览",
           kvRows([
             ["Planner", translateValue(planner.status || "未返回")],
-            ["模式", translateValue(snap.settings?.mode || run.mode || "auto")],
+            ["权限", permissionNames[snap.settings?.permissionMode || run.permissionMode || "workspace_full"] || translateValue(snap.settings?.permissionMode || run.permissionMode || "workspace_full")],
             ["最大步数", String(snap.settings?.maxSteps || payload.max_steps || "") || "未设置"],
             ["模型路由", "模型主导，系统只保留硬边界"]
           ]),
@@ -1127,13 +1140,16 @@ export const inspectorPanelPlugin = {
     function renderLifecycleDashboard(snap) {
       const payload = snap.runtimeStatus?.payload || {};
       const activation = payload.lifecycle?.runtime?.activation || {};
+      const lifecycleRuntime = payload.lifecycle?.runtime || {};
       const policy = payload.lifecycle?.policy || {};
-      const learning = payload.learning?.jingyan_chi || {};
+      const learning = payload.learning?.learning_cards || {};
       const pendingUpdates = safeArray(payload.lifecycle?.pending_updates);
-      const contextRatio = clamp(Number(activation.context_usage_ratio || 0) * 100);
+      const localContextChars = safeArray(snap.messages).reduce((total, item) => total + String(item?.content || "").length, 0);
+      const fallbackContextRatio = localContextChars ? clamp((localContextChars / 120000) * 100) : 0;
+      const contextRatio = clamp((Number(activation.context_usage_ratio || 0) * 100) || fallbackContextRatio);
       const memoryActive = Boolean(activation.memory_recall_active || wiringValue(payload, ["runtime", "interface_wiring", "memory_recall", "memory_store_attached"], false));
       const affectiveActive = Boolean(activation.affective_active || wiringValue(payload, ["runtime", "interface_wiring", "affective", "emotion_engine_attached"], false));
-      const lifecycleActive = Boolean(activation.lifecycle_active || pendingUpdates.length);
+      const lifecycleActive = Boolean(activation.lifecycle_active || pendingUpdates.length || lifecycleRuntime.scheduler_attached);
       const forgettingActive = Boolean(activation.forgetting_active || wiringValue(payload, ["runtime", "interface_wiring", "forgetting_review", "reviewer_attached"], false));
       const activeCount = [memoryActive, affectiveActive, lifecycleActive, forgettingActive].filter(Boolean).length;
       const stability = Math.round((activeCount / 4) * 100);
@@ -1261,7 +1277,7 @@ export const inspectorPanelPlugin = {
           "运行设置摘要",
           kvRows([
             ["工作区", concisePath(settings.workspace || payload.workspace || "未设置")],
-            ["运行模式", translateValue(settings.mode || "auto")],
+            ["权限", permissionNames[settings.permissionMode || payload.permission_mode || "workspace_full"] || translateValue(settings.permissionMode || payload.permission_mode || "workspace_full")],
             ["模型服务", settings.modelService || payload.provider || "未设置"],
             ["模型名", settings.modelName || payload.model || "未设置"],
             ["自由意志频率", translateValue(settings.lifecycleFreeWillFrequency || "manual")],

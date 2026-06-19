@@ -27,5 +27,6 @@
 - `browser_click_plan`
 - `browser_type_plan`
 - `browser_download_plan`
+- `web_download`
 - `browser_form_fill_plan`
 - `browser_session_close`

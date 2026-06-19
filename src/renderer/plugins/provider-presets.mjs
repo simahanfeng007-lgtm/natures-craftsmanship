@@ -63,6 +63,39 @@ export const providerPresets = {
       defaultDepth: "",
     },
   },
+  volcengine_ark: {
+    label: "火山方舟",
+    provider: "openai_compatible",
+    baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
+    model: "",
+    thinking: {
+      supported: false,
+      modes: [],
+      defaultDepth: "",
+    },
+  },
+  volcengine_agent_plan: {
+    label: "火山方舟 Agent Plan",
+    provider: "openai_compatible",
+    baseUrl: "https://ark.cn-beijing.volces.com/api/plan/v3",
+    model: "ark-code-latest",
+    thinking: {
+      supported: false,
+      modes: [],
+      defaultDepth: "",
+    },
+  },
+  volcengine_coding_plan: {
+    label: "火山方舟 Coding Plan",
+    provider: "openai_compatible",
+    baseUrl: "https://ark.cn-beijing.volces.com/api/coding/v3",
+    model: "ark-code-latest",
+    thinking: {
+      supported: false,
+      modes: [],
+      defaultDepth: "",
+    },
+  },
   minimax: {
     label: "MiniMax",
     provider: "minimax",
@@ -123,17 +156,34 @@ export function providerOptions(selected = "openai_compatible") {
     .join("");
 }
 
+function modelProfileForService(settings, presetId) {
+  const profiles = settings && typeof settings.modelProviderProfiles === "object" && !Array.isArray(settings.modelProviderProfiles)
+    ? settings.modelProviderProfiles
+    : {};
+  const profile = profiles[presetId];
+  return profile && typeof profile === "object" && !Array.isArray(profile) ? profile : null;
+}
+
 export function applyProviderPreset(settings, presetId) {
   const preset = providerPresets[presetId] || providerPresets.openai_compatible;
-  const thinking = providerThinkingCapability(presetId, preset.provider);
+  const profile = modelProfileForService(settings, presetId);
+  const provider = profile?.modelProvider || preset.provider;
+  const thinking = providerThinkingCapability(presetId, provider);
   return {
     ...settings,
     modelService: presetId,
-    modelProvider: preset.provider,
-    modelBaseUrl: preset.baseUrl,
-    modelName: preset.model,
-    modelThinkingEnabled: false,
-    modelThinkingDepth: thinking.defaultDepth || "",
+    modelProvider: provider,
+    modelBaseUrl: profile?.modelBaseUrl ?? preset.baseUrl,
+    modelName: profile?.modelName ?? preset.model,
+    modelApiKey: profile?.modelApiKey ?? "",
+    modelThinkingEnabled: Boolean(profile?.modelThinkingEnabled) && Boolean(thinking.supported),
+    modelThinkingDepth: profile?.modelThinkingDepth || thinking.defaultDepth || "",
+    modelMultimodalInput: profile?.modelMultimodalInput || settings?.modelMultimodalInput || "auto",
+    modelImageInput: profile?.modelImageInput || settings?.modelImageInput || "auto",
+    modelVideoInput: profile?.modelVideoInput || settings?.modelVideoInput || "auto",
+    modelAudioInput: profile?.modelAudioInput || settings?.modelAudioInput || "auto",
+    webSearchProvider: profile?.webSearchProvider || settings?.webSearchProvider || "auto",
+    imageGenerationMode: profile?.imageGenerationMode || settings?.imageGenerationMode || "auto",
   };
 }
 

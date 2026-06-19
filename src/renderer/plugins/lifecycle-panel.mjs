@@ -161,10 +161,12 @@ function metric(label, value, hint = "") {
 function renderLearningStatus(runtimeStatus, refs) {
   const payload = runtimeStatus?.payload || {};
   const learning = payload.learning || {};
-  const pool = learning.jingyan_chi || {};
+  const pool = learning.learning_cards || {};
   const skillQueue = learning.skill_queue || {};
   const toolRequests = learning.tool_requests || {};
   const latest = Array.isArray(pool.latest) ? pool.latest : [];
+  const busyId = refs.busyId || "";
+  const appBusy = Boolean(refs.appBusy);
   const pending = numberValue(pool.pending_learning);
   const failed = numberValue(pool.failed);
   const status = runtimeStatus?.loading ? "loading" : (learning.status || "empty");
@@ -172,7 +174,7 @@ function renderLearningStatus(runtimeStatus, refs) {
   refs.pill.textContent = runtimeStatus?.loading ? "读取中" : statusText(status);
   refs.pill.className = pillClass(status, pending, failed);
   refs.grid.innerHTML = [
-    metric("经验池", numberValue(pool.total), pool.path ? "已接入" : "未定位"),
+    metric("学习卡", numberValue(pool.total), pool.path ? "已接入" : "未定位"),
     metric("待学习", pending),
     metric("已生成候选", numberValue(pool.candidate_ready)),
     metric("已学习", numberValue(pool.learned) + numberValue(pool.learned_no_asset)),
@@ -191,7 +193,7 @@ function renderLearningStatus(runtimeStatus, refs) {
   if (!latest.length) {
     const empty = document.createElement("div");
     empty.className = "empty-detail";
-    empty.textContent = "暂无经验池记录。";
+    empty.textContent = "暂无学习卡记录。";
     refs.list.appendChild(empty);
     return;
   }
@@ -199,9 +201,15 @@ function renderLearningStatus(runtimeStatus, refs) {
   for (const item of latest) {
     const row = document.createElement("div");
     row.className = "learning-candidate-row";
+    const id = String(item.id || "").trim();
+    const busy = id && id === busyId;
+    const canLearn = Boolean(id && item.can_manual_learn && item.status === "pending_learning");
+    const canDelete = Boolean(id && item.can_delete && item.status === "pending_learning");
     const summary = item.summary || item.task_preview || item.learning_result || "暂无学习摘要";
     const labels = [
+      item.priority ? `优先级：${item.priority}${Number.isFinite(Number(item.priority_score)) ? ` / ${item.priority_score}` : ""}` : "",
       `来源：${sourceText(item.source)}`,
+      item.priority_reason ? `优先原因：${item.priority_reason}` : "",
       item.task_preview ? `原任务：${item.task_preview}` : "",
       item.judge_reason ? `判定理由：${item.judge_reason}` : "",
       item.learning_result ? `学习结果：${item.learning_result}` : "",
@@ -214,7 +222,11 @@ function renderLearningStatus(runtimeStatus, refs) {
         <strong>学习内容：${escapeHtml(summary)}</strong>
         <p>${escapeHtml(labels.join(" · ") || "等待自动学习链处理")}</p>
       </div>
-      <span class="${pillClass(item.status, item.status === "pending_learning" ? 1 : 0, item.status === "failed" ? 1 : 0)}">${escapeHtml(statusText(item.status))}</span>
+      <div class="learning-candidate-actions">
+        <span class="${pillClass(item.status, item.status === "pending_learning" ? 1 : 0, item.status === "failed" ? 1 : 0)}">${escapeHtml(busy ? "处理中" : statusText(item.status))}</span>
+        ${canLearn ? `<button class="small-command" type="button" data-learning-action="learn" data-learning-id="${escapeHtml(id)}" ${busy || appBusy ? "disabled" : ""}>学习</button>` : ""}
+        ${canDelete ? `<button class="small-command subtle-command" type="button" data-learning-action="delete" data-learning-id="${escapeHtml(id)}" ${busy || appBusy ? "disabled" : ""}>删除</button>` : ""}
+      </div>
     `;
     refs.list.appendChild(row);
   }
@@ -254,6 +266,19 @@ export const lifecyclePanelPlugin = {
               </div>
               <div id="lifecyclePending" class="lifecycle-pending"></div>
             </section>
+
+            <section class="panel-card wide-card">
+              <div class="panel-title">
+                <span>自主学习候选池</span>
+                <span id="lifecycleLearningState" class="mini-pill">等待刷新</span>
+              </div>
+              <div id="lifecycleLearningStatusGrid" class="learning-status-grid"></div>
+              <div class="panel-title compact-title">
+                <span>未学习内容</span>
+                <button id="lifecycleLearningRefresh" class="small-command" type="button">刷新</button>
+              </div>
+              <div id="lifecycleLearningList" class="learning-candidate-list"></div>
+            </section>
           </section>
         </section>
       `
@@ -262,7 +287,27 @@ export const lifecyclePanelPlugin = {
     const panel = slot.querySelector('[data-page-panel="lifecycle"]');
     const pending = panel.querySelector("#lifecyclePending");
     const pendingState = panel.querySelector("#lifecyclePendingState");
+    const learningRefresh = panel.querySelector("#lifecycleLearningRefresh");
+    const learningRefs = {
+      pill: panel.querySelector("#lifecycleLearningState"),
+      grid: panel.querySelector("#lifecycleLearningStatusGrid"),
+      list: panel.querySelector("#lifecycleLearningList"),
+      busyId: "",
+      appBusy: false
+    };
     let pendingBusyId = "";
+    let learningBusyId = "";
+
+    function learningItemById(id) {
+      const latest = state.snapshot().runtimeStatus?.payload?.learning?.learning_cards?.latest;
+      return (Array.isArray(latest) ? latest : []).find((item) => String(item.id || "") === String(id || "")) || {};
+    }
+
+    function renderLearning(runtimeStatus = state.snapshot().runtimeStatus) {
+      learningRefs.busyId = learningBusyId;
+      learningRefs.appBusy = Boolean(state.snapshot().busy);
+      renderLearningStatus(runtimeStatus, learningRefs);
+    }
 
     function renderPage(page) {
       panel.classList.toggle("active", page === "lifecycle");
@@ -273,6 +318,7 @@ export const lifecyclePanelPlugin = {
 
     function renderSettings(settings) {
       renderLifecyclePending(state.snapshot().runtimeStatus);
+      renderLearning(state.snapshot().runtimeStatus);
     }
 
     function renderLifecyclePending(runtimeStatus) {
@@ -317,13 +363,42 @@ export const lifecyclePanelPlugin = {
         renderLifecyclePending(state.snapshot().runtimeStatus);
       }
     });
+    learningRefresh.addEventListener("click", () => actions.refreshStatus?.());
+    learningRefs.list.addEventListener("click", async (event) => {
+      const button = event.target.closest("[data-learning-action]");
+      if (!button) return;
+      const learningId = button.dataset.learningId || "";
+      const action = button.dataset.learningAction || "learn";
+      if (!learningId) return;
+      if (action === "delete" && !window.confirm("删除这条未学习内容？")) return;
+      learningBusyId = learningId;
+      renderLearning();
+      try {
+        const result = action === "delete"
+          ? await actions.deleteLearningExperience?.(learningId)
+          : await actions.learnLearningExperience?.(learningId, learningItemById(learningId));
+        if (action === "delete" && result?.ok === false) {
+          learningRefs.pill.textContent = result?.message || result?.error || "删除失败";
+          learningRefs.pill.className = "mini-pill failed";
+        }
+      } catch (error) {
+        learningRefs.pill.textContent = error?.message || "处理失败";
+        learningRefs.pill.className = "mini-pill failed";
+      } finally {
+        learningBusyId = "";
+        renderLearning(state.snapshot().runtimeStatus);
+      }
+    });
 
     state.on("page", renderPage);
     state.on("settings", renderSettings);
     state.on("runtimeStatus", renderLifecyclePending);
+    state.on("runtimeStatus", renderLearning);
+    state.on("busy", () => renderLearning());
     const snap = state.snapshot();
     renderPage(snap.activePage);
     renderSettings(snap.settings);
     renderLifecyclePending(snap.runtimeStatus);
+    renderLearning(snap.runtimeStatus);
   }
 };

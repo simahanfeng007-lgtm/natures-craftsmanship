@@ -72,6 +72,14 @@ class MemoryRecord:
     public_projection_allowed: bool = False
     emotional_tag: str = ""
     ai_comment: str = ""
+    event_summary: str = ""
+    event_cause: str = ""
+    event_process: str = ""
+    event_result: str = ""
+    event_current_state: str = ""
+    event_usage: str = ""
+    original_user_excerpt: str = ""
+    assistant_reply_excerpt: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.memory_id, str) or not self.memory_id.strip():
@@ -147,6 +155,14 @@ class MemoryRecord:
             "public_projection_allowed": self.public_projection_allowed,
             "emotional_tag": self.emotional_tag,
             "ai_comment": self.ai_comment,
+            "event_summary": self.event_summary,
+            "event_cause": self.event_cause,
+            "event_process": self.event_process,
+            "event_result": self.event_result,
+            "event_current_state": self.event_current_state,
+            "event_usage": self.event_usage,
+            "original_user_excerpt": self.original_user_excerpt,
+            "assistant_reply_excerpt": self.assistant_reply_excerpt,
         }
 
     @classmethod
@@ -231,6 +247,52 @@ class MemoryStoreBridge:
             raise ValueError("memory_id is required")
         return self._append_event("active_recall_suppressed", memory_id, {"active_recall_suppressed": True, "reason_ref": reason_ref})
 
+    def physical_delete(
+        self,
+        memory_id: str,
+        *,
+        reason_ref: str = "forgetting:physical_delete",
+        expected_level: MemoryLevel | str,
+    ) -> MemoryStoreEvent:
+        """Physically remove prior events for one memory and keep a minimal marker."""
+        if not memory_id:
+            raise ValueError("memory_id is required")
+        expected = MemoryLevel(expected_level).value
+        record = self.replay_records().get(memory_id)
+        if record is None:
+            raise ValueError(f"cannot physical-delete missing memory: {memory_id}")
+        if record.memory_level.value != expected:
+            raise ValueError(f"physical delete expected {expected}, got {record.memory_level.value}")
+        kept_events = [event for event in self.read_events() if str(event.get("memory_id") or "") != memory_id]
+        delete_event = MemoryStoreEvent(
+            event_id=f"memevt_{uuid4().hex[:16]}",
+            event_type="physical_delete_applied",
+            created_at=time(),
+            memory_id=memory_id,
+            payload={"reason_ref": reason_ref},
+        ).public_dict()
+        kept_events.append(delete_event)
+        tmp_path = self.store_path.with_name(f"{self.store_path.name}.tmp.{uuid4().hex}")
+        try:
+            with tmp_path.open("w", encoding="utf-8") as fh:
+                for event in kept_events:
+                    fh.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
+            tmp_path.replace(self.store_path)
+        finally:
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except Exception:
+                pass
+        return MemoryStoreEvent(
+            event_id=delete_event["event_id"],
+            event_type=delete_event["event_type"],
+            created_at=delete_event["created_at"],
+            memory_id=delete_event["memory_id"],
+            payload=dict(delete_event["payload"]),
+            event_hash=delete_event["event_hash"],
+        )
+
     def record_use_feedback(self, memory_id: str, *, used_successfully: bool, reason_ref: str = "evidence:l6_40_memory_use_feedback") -> MemoryStoreEvent:
         ensure_bool(used_successfully, "MemoryStoreBridge.used_successfully")
         return self._append_event("use_feedback_recorded", memory_id, {"used_successfully": used_successfully, "reason_ref": reason_ref})
@@ -263,6 +325,13 @@ class MemoryStoreBridge:
             elif kind == "active_recall_suppressed" and memory_id in records:
                 event_time = float(event.get("created_at") or records[memory_id].updated_at)
                 records[memory_id] = records[memory_id].with_updates(active_recall_suppressed=True, updated_at=event_time)
+            elif str(kind or "").startswith(("promoted_to_", "demoted_to_")) and memory_id in records:
+                event_time = float(event.get("created_at") or records[memory_id].updated_at)
+                new_level = str(payload.get("new_level") or "").strip().upper()
+                if new_level:
+                    records[memory_id] = records[memory_id].with_updates(memory_level=new_level, updated_at=event_time)
+            elif kind == "physical_delete_applied":
+                records.pop(memory_id, None)
             elif kind == "use_feedback_recorded" and memory_id in records:
                 current = records[memory_id]
                 event_time = float(event.get("created_at") or current.updated_at)
@@ -287,7 +356,7 @@ class MemoryStoreBridge:
             "summary_only": True,
             "append_only": True,
             "no_raw_memory_body": True,
-            "no_physical_delete": True,
+            "physical_delete_supported": True,
         }
         if path is None:
             return payload
