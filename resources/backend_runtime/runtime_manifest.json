@@ -1,0 +1,34 @@
+﻿{
+    "schema":  "tiangong.packaging.embedded_python_runtime.v1",
+    "created_at":  "2026-06-18T20:22:00+08:00",
+    "platform":  "Windows-Microsoft Windows NT 10.0.19045.0",
+    "signal_kind":  "resource",
+    "health_state":  "healthy",
+    "core_result":  {
+                        "status":  "ok",
+                        "reason":  ""
+                    },
+    "runtime":  "C:\\Users\\77571\\Documents\\天工造物重生\\_purified\\天工造物v2_purified_20260618_201749\\project\\resources\\backend_runtime",
+    "python":  "C:\\Users\\77571\\Documents\\天工造物重生\\_purified\\天工造物v2_purified_20260618_201749\\project\\resources\\backend_runtime\\python\\python.exe",
+    "required_imports":  [
+                             "openai",
+                             "pytest"
+                         ],
+    "import_check":  {
+                         "ok":  true,
+                         "missing":  [
+
+                                     ],
+                         "details":  {
+                                         "python.version":  "3.12.10",
+                                         "python312.zip":  "ok:3835482",
+                                         "openai.OpenAI":  "2.41.1",
+                                         "pytest":  "9.1.0"
+                                     },
+                         "returncode":  0
+                     },
+    "steps":  [
+                  "reinstalled official python-3.12.10-embed-amd64 into resources/backend_runtime/python",
+                  "kept package-local backend and site-packages in python312._pth"
+              ]
+}

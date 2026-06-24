@@ -1,0 +1,51 @@
+[
+  {
+    "case_id": "lead_signal_extract",
+    "tool": "lead_signal_extract",
+    "args": {
+      "text": "客户说近期想做AI培训和知识库，HR负责人约了明天下午沟通。"
+    },
+    "expect": "signal_score"
+  },
+  {
+    "case_id": "lead_priority_rank",
+    "tool": "lead_priority_rank",
+    "args": {
+      "records": [
+        {
+          "公司": "A",
+          "需求": "AI培训 降本提效"
+        },
+        {
+          "公司": "B",
+          "需求": "暂无"
+        }
+      ]
+    },
+    "expect": "ranked"
+  },
+  {
+    "case_id": "ops_bottleneck_detect",
+    "tool": "ops_bottleneck_detect",
+    "args": {
+      "data": {
+        "获客": 100,
+        "留资": 30,
+        "激活": 20,
+        "需求诊断": 5,
+        "方案": 3,
+        "报价": 1,
+        "成交": 1
+      }
+    },
+    "expect": "bottleneck"
+  },
+  {
+    "case_id": "deal_stage_judge",
+    "tool": "deal_stage_judge",
+    "args": {
+      "text": "客户已经看了方案，正在问报价和预算。"
+    },
+    "expect": "stage"
+  }
+]

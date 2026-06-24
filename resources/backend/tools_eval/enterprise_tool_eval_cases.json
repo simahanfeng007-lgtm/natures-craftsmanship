@@ -1,0 +1,38 @@
+[
+  {
+    "case_id": "table_profile_missing",
+    "tool": "table_profile",
+    "args": {
+      "path": "missing.csv"
+    },
+    "expect": "failed_with_error_code"
+  },
+  {
+    "case_id": "db_readonly_reject_write",
+    "tool": "db_query_readonly",
+    "args": {
+      "db_path": "test.db",
+      "sql": "drop table users"
+    },
+    "expect": "unsafe_sql"
+  },
+  {
+    "case_id": "kb_chunk_preview",
+    "tool": "kb_chunk_preview",
+    "args": {
+      "text": "第一段内容。\\n\\n第二段内容。",
+      "chunk_size": 20
+    },
+    "expect": "chunks"
+  },
+  {
+    "case_id": "lead_score",
+    "tool": "lead_score",
+    "args": {
+      "lead": {
+        "需求": "AI培训 数字化 提效"
+      }
+    },
+    "expect": "score"
+  }
+]

@@ -1,0 +1,905 @@
+const { app, BrowserWindow, dialog, ipcMain, shell, Menu } = require("electron");
+const path = require("path");
+const fs = require("fs");
+const os = require("os");
+const crypto = require("crypto");
+const { spawn, spawnSync } = require("child_process");
+
+const APP_DIR = __dirname;
+const DEV_ROOT = path.resolve(APP_DIR, "..", "..");
+const RESOURCE_ROOT = app.isPackaged ? process.resourcesPath : DEV_ROOT;
+const BACKEND = app.isPackaged ? path.join(RESOURCE_ROOT, "backend") : DEV_ROOT;
+const RUNTIME_ROOT = app.isPackaged
+  ? path.join(RESOURCE_ROOT, "backend_runtime")
+  : path.join(DEV_ROOT, "installer", "runtime", "backend_runtime");
+const ROOT = BACKEND;
+const RUN_AGENT = path.join(BACKEND, "run_agent.py");
+const KNOWLEDGE_BRIDGE = path.join(BACKEND, "knowledge_bridge.py");
+const PRELOAD = path.join(APP_DIR, "preload.js");
+const INDEX = path.join(APP_DIR, "src", "index.html");
+const APP_ICON = path.join(APP_DIR, "src", "assets", "tiangong-logo.png");
+const STREAM_EVENT_PREFIX = "__TIANGONG_STREAM_EVENT__ ";
+const STREAM_EVENT_CHANNEL = "runtime:run-step";
+
+let mainWindow = null;
+let cachedPythonSitePaths = null;
+let cachedBundledPythonHealth = null;
+
+function writeDebugLog(message, extra = "") {
+  try {
+    const line = `[${new Date().toISOString()}] ${message}${extra ? ` ${extra}` : ""}\n`;
+    const logDir = app.isReady() ? app.getPath("userData") : APP_DIR;
+    fs.mkdirSync(logDir, { recursive: true });
+    fs.appendFileSync(path.join(logDir, "electron-render.log"), line, "utf8");
+  } catch {
+    // Debug logging must never block startup.
+  }
+}
+
+function redactRuntimeText(value) {
+  let text = String(value || "");
+  const settings = app.isReady() ? readSettings() : {};
+  for (const secret of [
+    settings.modelApiKey,
+    process.env.TIANGONG_API_KEY,
+    process.env.OPENAI_API_KEY,
+    process.env.DEEPSEEK_API_KEY
+  ]) {
+    const token = String(secret || "").trim();
+    if (token) text = text.split(token).join("<redacted>");
+  }
+  return text.length > 200000 ? `${text.slice(0, 200000)}\n[truncated]` : text;
+}
+
+function writeBackendRunLog(event, payload = {}) {
+  try {
+    const logDir = app.isReady() ? app.getPath("userData") : APP_DIR;
+    fs.mkdirSync(logDir, { recursive: true });
+    const line = JSON.stringify({
+      ts: new Date().toISOString(),
+      event,
+      ...payload,
+      stdout: redactRuntimeText(payload.stdout || ""),
+      stderr: redactRuntimeText(payload.stderr || "")
+    }) + "\n";
+    fs.appendFileSync(path.join(logDir, "backend-run.log"), line, "utf8");
+  } catch {
+    // Backend logging must not affect execution.
+  }
+}
+
+function userDataFile() {
+  return path.join(app.getPath("userData"), "runtime-settings.json");
+}
+
+function defaultWorkspace() {
+  return path.join(os.homedir(), "Desktop");
+}
+
+function readSettings() {
+  const fallback = {
+    workspace: defaultWorkspace(),
+    maxSteps: 20,
+    mode: "auto",
+    personaName: "临渊者",
+    soulPrompt: "",
+    personaAvatarDataUrl: "",
+    themeStyle: "ink_teal",
+    modelService: "minimax",
+    modelProvider: "minimax",
+    modelBaseUrl: "https://api.minimaxi.com/v1",
+    modelName: "MiniMax-M3",
+    modelApiKey: "",
+    lifecycleFreeWillFrequency: "manual",
+    lifecycleLearningScope: "workspace"
+  };
+  try {
+    const raw = fs.readFileSync(userDataFile(), "utf8");
+    return { ...fallback, ...JSON.parse(raw) };
+  } catch {
+    return fallback;
+  }
+}
+
+function writeSettings(next) {
+  const current = readSettings();
+  const merged = { ...current, ...next };
+  fs.mkdirSync(path.dirname(userDataFile()), { recursive: true });
+  fs.writeFileSync(userDataFile(), JSON.stringify(merged, null, 2), "utf8");
+  return merged;
+}
+
+function imageMimeType(filePath) {
+  const ext = path.extname(String(filePath || "")).toLowerCase();
+  if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
+  if (ext === ".webp") return "image/webp";
+  if (ext === ".gif") return "image/gif";
+  if (ext === ".svg") return "image/svg+xml";
+  return "image/png";
+}
+
+async function choosePersonaAvatar() {
+  const current = readSettings();
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "选择人物头像",
+    properties: ["openFile"],
+    filters: [
+      { name: "图片", extensions: ["png", "jpg", "jpeg", "webp", "gif", "svg"] }
+    ]
+  });
+  if (result.canceled || !result.filePaths[0]) return current;
+  const filePath = result.filePaths[0];
+  const stat = fs.statSync(filePath);
+  if (stat.size > 8 * 1024 * 1024) {
+    return current;
+  }
+  const data = fs.readFileSync(filePath);
+  const avatarDataUrl = `data:${imageMimeType(filePath)};base64,${data.toString("base64")}`;
+  return writeSettings({ personaAvatarDataUrl: avatarDataUrl });
+}
+
+function pythonCommand() {
+  const bundled = bundledPythonCommand();
+  if (bundled) {
+    const health = bundledPythonHealth(bundled);
+    if (health.ok) return bundled;
+    return {
+      ...bundled,
+      missing: true,
+      message: health.message || "内置 Python 运行时不完整，请重新安装完整安装包。"
+    };
+  }
+  if (app.isPackaged) {
+    return {
+      command: process.platform === "win32"
+        ? path.join(RUNTIME_ROOT, "python", "python.exe")
+        : path.join(RUNTIME_ROOT, "python", "bin", "python3"),
+      prefix: [],
+      bundled: true,
+      missing: true,
+      message: "未找到内置 Python 运行时，请重新安装完整安装包。"
+    };
+  }
+  if (process.env.LINYUANZHE_PYTHON) {
+    return { command: process.env.LINYUANZHE_PYTHON, prefix: [], bundled: false };
+  }
+  if (process.env.PYTHON) {
+    return { command: process.env.PYTHON, prefix: [], bundled: false };
+  }
+  return { command: process.platform === "win32" ? "python" : "python3", prefix: [], bundled: false };
+}
+
+function bundledPythonCommand() {
+  const candidates = process.platform === "win32"
+    ? [
+        path.join(RUNTIME_ROOT, "python", "python.exe"),
+        path.join(RUNTIME_ROOT, "python.exe")
+      ]
+    : [
+        path.join(RUNTIME_ROOT, "python", "bin", "python3"),
+        path.join(RUNTIME_ROOT, "python", "bin", "python"),
+        path.join(RUNTIME_ROOT, "python3"),
+        path.join(RUNTIME_ROOT, "python")
+      ];
+  const command = candidates.find((item) => fs.existsSync(item));
+  return command ? { command, prefix: [], bundled: true, pythonHome: path.dirname(command) } : null;
+}
+
+function existingDirs(items) {
+  return items.filter((item) => item && fs.existsSync(item) && fs.statSync(item).isDirectory());
+}
+
+function bundledSitePaths() {
+  const paths = [
+    path.join(RUNTIME_ROOT, "site-packages"),
+    path.join(RUNTIME_ROOT, "python", "site-packages"),
+    path.join(RUNTIME_ROOT, "python", "Lib", "site-packages")
+  ];
+  const libDir = path.join(RUNTIME_ROOT, "python", "lib");
+  try {
+    for (const name of fs.readdirSync(libDir)) {
+      if (/^python\d+(\.\d+)?$/i.test(name)) {
+        paths.push(path.join(libDir, name, "site-packages"));
+        paths.push(path.join(libDir, name, "dist-packages"));
+      }
+    }
+  } catch {
+    // The Windows embeddable layout has no lib/pythonX.Y directory.
+  }
+  return existingDirs(paths);
+}
+
+function pythonBaseEnv(py, extra = {}) {
+  const env = { ...process.env };
+  for (const key of [
+    "PYTHONHOME",
+    "PYTHONEXECUTABLE",
+    "PYTHONUSERBASE",
+    "VIRTUAL_ENV",
+    "CONDA_PREFIX",
+    "CONDA_DEFAULT_ENV",
+    "__PYVENV_LAUNCHER__"
+  ]) {
+    delete env[key];
+  }
+  if (py?.bundled && py.pythonHome) {
+    env.PYTHONHOME = py.pythonHome;
+  }
+  env.PYTHONUTF8 = "1";
+  env.PYTHONIOENCODING = "utf-8:replace";
+  env.PYTHONNOUSERSITE = "1";
+  env.PYTHONDONTWRITEBYTECODE = "1";
+  env.PATH = pythonNativePathValue(py);
+  return { ...env, ...extra };
+}
+
+function bundledPythonHealth(py) {
+  if (!py?.bundled) return { ok: true };
+  if (cachedBundledPythonHealth?.command === py.command) return cachedBundledPythonHealth;
+  try {
+    const result = spawnSync(py.command, [
+      "-S",
+      "-c",
+      "import encodings, runpy, sys; print(sys.executable)"
+    ], {
+      cwd: RUNTIME_ROOT,
+      encoding: "utf8",
+      env: pythonBaseEnv(py, {
+        PYTHONPATH: [BACKEND, ...bundledSitePaths()].join(path.delimiter)
+      }),
+      windowsHide: true,
+      timeout: 10000
+    });
+    const ok = result.status === 0;
+    cachedBundledPythonHealth = {
+      command: py.command,
+      ok,
+      message: ok ? "" : `内置 Python 运行时启动失败：${String(result.stderr || result.stdout || "").slice(0, 1200)}`
+    };
+  } catch (error) {
+    cachedBundledPythonHealth = {
+      command: py.command,
+      ok: false,
+      message: `内置 Python 运行时启动失败：${error?.message || String(error)}`
+    };
+  }
+  return cachedBundledPythonHealth;
+}
+
+function pythonSitePaths(py) {
+  if (Array.isArray(cachedPythonSitePaths)) return cachedPythonSitePaths;
+  const bundledPaths = bundledSitePaths();
+  try {
+    const script = [
+      "import json, site",
+      "paths = []",
+      "paths.extend(getattr(site, 'getsitepackages', lambda: [])())",
+      "paths.append(site.getusersitepackages())",
+      "print(json.dumps(paths, ensure_ascii=False))"
+    ].join("; ");
+    const result = spawnSync(py.command, [...py.prefix, "-c", script], {
+      cwd: ROOT,
+      encoding: "utf8",
+      env: pythonBaseEnv(py, {
+        PYTHONPATH: [BACKEND, ...bundledPaths].join(path.delimiter)
+      }),
+      windowsHide: true
+    });
+    const raw = String(result.stdout || "").trim().split(/\r?\n/).pop();
+    const values = JSON.parse(raw || "[]");
+    const probed = Array.isArray(values)
+      ? values.map((item) => String(item || "")).filter((item) => item && fs.existsSync(item))
+      : [];
+    cachedPythonSitePaths = [...new Set([...bundledPaths, ...probed])];
+  } catch {
+    cachedPythonSitePaths = bundledPaths;
+  }
+  return cachedPythonSitePaths;
+}
+
+function pythonPathValue(py) {
+  const parts = [BACKEND];
+  parts.push(...pythonSitePaths(py));
+  if (!py?.bundled && process.env.PYTHONPATH) parts.push(process.env.PYTHONPATH);
+  return parts.join(path.delimiter);
+}
+
+function pythonNativePathValue(py) {
+  const parts = existingDirs([
+    path.dirname(py.command || ""),
+    path.join(RUNTIME_ROOT, "python"),
+    path.join(RUNTIME_ROOT, "python", "DLLs"),
+    path.join(RUNTIME_ROOT, "python", "bin"),
+    path.join(RUNTIME_ROOT, "lib")
+  ]);
+  if (process.env.PATH) parts.push(process.env.PATH);
+  return parts.join(path.delimiter);
+}
+
+function backendPythonEnv(py, extra = {}) {
+  return pythonBaseEnv(py, {
+    PYTHONPATH: pythonPathValue(py),
+    TIANGONG_BACKEND_ROOT: BACKEND,
+    TIANGONG_BACKEND_RUNTIME: RUNTIME_ROOT,
+    TIANGONG_ENTRY_CHANNEL: "desktop_gui",
+    ...extra
+  });
+}
+
+function pythonUnavailableResult(py) {
+  return {
+    ok: false,
+    code: 1,
+    stdout: "",
+    stderr: py.message || "Python 运行时不可用。",
+    elapsedMs: 0,
+    workspace: "",
+    mode: "",
+    maxSteps: ""
+  };
+}
+
+function pythonScriptArgs(py, scriptPath, scriptArgs = []) {
+  const argv = [scriptPath, ...scriptArgs.map((item) => String(item))];
+  if (!py.bundled) {
+    return [...py.prefix, "-S", scriptPath, ...scriptArgs.map((item) => String(item))];
+  }
+  const code = [
+    "import runpy, sys",
+    `sys.path.insert(0, ${JSON.stringify(BACKEND)})`,
+    `sys.argv = ${JSON.stringify(argv)}`,
+    `runpy.run_path(${JSON.stringify(scriptPath)}, run_name='__main__')`
+  ].join("; ");
+  return [...py.prefix, "-S", "-c", code];
+}
+
+function sessionScope(settings = {}, workspaceValue = "") {
+  const workspace = String(workspaceValue || settings.workspace || defaultWorkspace());
+  const persona = String(settings.personaName || "临渊者").slice(0, 64);
+  const digest = crypto.createHash("sha256").update(`${workspace}\n${persona}`).digest("hex").slice(0, 16);
+  return `electron_web_v2_${digest}`;
+}
+
+function normalizeFrontendMode(value) {
+  const mode = String(value || "auto").trim().toLowerCase();
+  if (mode === "chat" || mode === "work") return mode;
+  return "auto";
+}
+
+function modelArgsFromSettings(settings) {
+  const service = String(settings.modelService || "").trim();
+  const provider = String(settings.modelProvider || "openai_compatible").trim();
+  const baseUrl = String(settings.modelBaseUrl || "").trim();
+  const model = String(settings.modelName || "").trim();
+  const toolMode = String(settings.toolMode || "").trim();
+  const plannerMode = String(settings.plannerMode || "").trim();
+  const hasExplicitModelSettings = Boolean(baseUrl || model || (service && service !== "openai_compatible") || (provider && provider !== "openai_compatible"));
+  const args = [];
+  if (hasExplicitModelSettings) {
+    if (provider) args.push("--provider", provider);
+    if (baseUrl) args.push("--base-url", baseUrl);
+    if (model) args.push("--model", model);
+  }
+  if (toolMode) args.push("--tool-mode", toolMode);
+  if (plannerMode) args.push("--planner-mode", plannerMode);
+  return args;
+}
+
+function modelEnvFromSettings(settings) {
+  const env = {};
+  const service = String(settings.modelService || "").trim();
+  const provider = String(settings.modelProvider || "").trim();
+  const baseUrl = String(settings.modelBaseUrl || "").trim();
+  const apiKey = String(settings.modelApiKey || "").trim();
+  const model = String(settings.modelName || "").trim();
+  const toolMode = String(settings.toolMode || "").trim();
+  const plannerMode = String(settings.plannerMode || "").trim();
+  const freeWillFrequency = String(settings.lifecycleFreeWillFrequency || "manual").trim();
+  const learningScope = String(settings.lifecycleLearningScope || "workspace").trim();
+  const hasExplicitModelSettings = Boolean(baseUrl || apiKey || model || (service && service !== "openai_compatible") || (provider && provider !== "openai_compatible"));
+  if (hasExplicitModelSettings) {
+    if (provider) env.TIANGONG_PROVIDER = provider;
+    if (baseUrl) env.TIANGONG_BASE_URL = baseUrl;
+    if (apiKey) env.TIANGONG_API_KEY = apiKey;
+    if (model) env.TIANGONG_MODEL = model;
+  }
+  if (toolMode) env.TIANGONG_TOOL_MODE = toolMode;
+  if (plannerMode) env.TIANGONG_PLANNER_MODE = plannerMode;
+  if (freeWillFrequency) {
+    env.TIANGONG_FREE_WILL_FREQUENCY = freeWillFrequency;
+    env.LINYUANZHE_FREE_WILL_FREQUENCY = freeWillFrequency;
+  }
+  if (learningScope) {
+    env.TIANGONG_LEARNING_SCOPE = learningScope;
+    env.LINYUANZHE_LEARNING_SCOPE = learningScope;
+  }
+  return env;
+}
+
+function emitRunStep(requestId, payload) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  try {
+    mainWindow.webContents.send(STREAM_EVENT_CHANNEL, {
+      ...(payload || {}),
+      requestId: String(payload?.requestId || payload?.request_id || requestId || ""),
+      request_id: String(payload?.request_id || payload?.requestId || requestId || "")
+    });
+  } catch {
+    // Progress events must not affect backend execution.
+  }
+}
+
+function consumeStreamEventLine(line, requestId) {
+  const text = String(line || "").trim();
+  if (!text.startsWith(STREAM_EVENT_PREFIX)) return false;
+  try {
+    const payload = JSON.parse(text.slice(STREAM_EVENT_PREFIX.length).trim());
+    emitRunStep(requestId, payload);
+  } catch (error) {
+    emitRunStep(requestId, {
+      schema: "tiangong.desktop.stream_event.v1",
+      type: "step",
+      step_id: "progress_parse",
+      title: "运行步骤解析",
+      status: "failed",
+      summary: error?.message || String(error)
+    });
+  }
+  return true;
+}
+
+function runBackend(message, options = {}) {
+  return new Promise((resolve) => {
+    if (!fs.existsSync(RUN_AGENT)) {
+      resolve({
+        ok: false,
+        code: 1,
+        stdout: "",
+        stderr: "找不到后端运行代理",
+        elapsedMs: 0
+      });
+      return;
+    }
+
+    const settings = { ...readSettings(), ...(options || {}) };
+    const requestId = String(options.requestId || options.request_id || crypto.randomUUID());
+    const workspace = String(options.workspace || settings.workspace || defaultWorkspace());
+    const maxSteps = String(options.maxSteps || settings.maxSteps || 20);
+    const numericMaxSteps = Math.max(1, Math.min(80, Number(maxSteps) || 20));
+    const hardTimeoutMs = Math.max(
+      60000,
+      Math.min(900000, Number(process.env.TIANGONG_BACKEND_TIMEOUT_MS || 0) || (60000 + numericMaxSteps * 45000))
+    );
+    const afterOutputGraceMs = Math.max(
+      3000,
+      Math.min(60000, Number(process.env.TIANGONG_BACKEND_AFTER_OUTPUT_GRACE_MS || 0) || 8000)
+    );
+    const mode = normalizeFrontendMode(options.mode || settings.mode || "auto");
+    const personaName = String(options.personaName || settings.personaName || "临渊者").slice(0, 32);
+    const soulPrompt = String(options.soulPrompt || settings.soulPrompt || "").slice(0, 6000);
+    writeBackendRunLog("start", {
+      requestId,
+      workspace,
+      mode,
+      maxSteps,
+      provider: settings.modelProvider || settings.modelService || "",
+      model: settings.modelName || "",
+      messagePreview: String(message || "").slice(0, 240)
+    });
+    const py = pythonCommand();
+    if (py.missing) {
+      resolve(pythonUnavailableResult(py));
+      return;
+    }
+    const args = pythonScriptArgs(py, RUN_AGENT, [
+      "--once",
+      String(message || ""),
+      "--workspace",
+      workspace,
+      "--max-steps",
+      maxSteps,
+      ...modelArgsFromSettings(settings)
+    ]);
+    const env = backendPythonEnv(py, {
+      ...modelEnvFromSettings(settings),
+      TIANGONG_SESSION_SCOPE: sessionScope(settings, workspace),
+      TIANGONG_SOUL_NAME: personaName,
+      LINYUANZHE_PERSONA_NAME: personaName,
+      TIANGONG_SOUL_PROMPT: soulPrompt,
+      LINYUANZHE_PERSONA_PROMPT: soulPrompt,
+      LINYUANZHE_FRONTEND_WORK_MODE: mode,
+      TIANGONG_TASK_MODE: mode === "work" ? "work_task" : "ordinary_chat",
+      LINYUANZHE_TOOLS_REQUESTED: mode === "chat" ? "0" : "1",
+      LINYUANZHE_PLANNER_ALLOWED: mode === "chat" ? "0" : "1",
+      TIANGONG_STREAM_EVENTS: "1",
+      TIANGONG_REQUEST_ID: requestId
+    });
+    delete env.PYTHONSTARTUP;
+
+    const started = Date.now();
+    const child = spawn(py.command, args, {
+      cwd: ROOT,
+      env,
+      windowsHide: true
+    });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    let lastStdoutAt = 0;
+    let streamLineBuffer = "";
+
+    function consumeStreamChunk(text) {
+      streamLineBuffer += String(text || "");
+      const lines = streamLineBuffer.split(/\r?\n/);
+      streamLineBuffer = lines.pop() || "";
+      for (const line of lines) consumeStreamEventLine(line, requestId);
+    }
+
+    function flushStreamBuffer() {
+      if (!streamLineBuffer) return;
+      consumeStreamEventLine(streamLineBuffer, requestId);
+      streamLineBuffer = "";
+    }
+
+    function stopChild() {
+      if (!child.pid || child.killed) return;
+      try {
+        if (process.platform === "win32") {
+          spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true });
+        } else {
+          child.kill("SIGTERM");
+        }
+      } catch {
+        try {
+          child.kill();
+        } catch {
+          // Ignore shutdown races.
+        }
+      }
+    }
+
+    function finish(result) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(hardTimer);
+      clearInterval(afterOutputTimer);
+      writeBackendRunLog("finish", {
+        requestId,
+        ok: Boolean(result.ok),
+        code: result.code ?? "",
+        elapsedMs: Date.now() - started,
+        workspace,
+        mode,
+        maxSteps,
+        stdout: result.stdout || "",
+        stderr: result.stderr || ""
+      });
+      resolve({
+        ...result,
+        elapsedMs: Date.now() - started,
+        workspace,
+        mode,
+        maxSteps,
+        requestId
+      });
+    }
+
+    function stdoutHasCompletionSignal() {
+      const text = String(stdout || "");
+      return text.includes("[CoreResult / direct-file 写回验真]")
+        || text.includes("[CoreResult / pytest 验真]")
+        || (text.includes("CoreResult.status=") && text.includes("HealthState="));
+    }
+
+    const hardTimer = setTimeout(() => {
+      stderr = `${stderr}\n[HealthState] 后端执行超过 ${hardTimeoutMs}ms，已终止。`.trim();
+      stopChild();
+      finish({ ok: false, code: 124, stdout, stderr });
+    }, hardTimeoutMs);
+
+    const afterOutputTimer = setInterval(() => {
+      if (!stdout.trim() || !lastStdoutAt) return;
+      if (!stdoutHasCompletionSignal()) return;
+      if (Date.now() - lastStdoutAt < afterOutputGraceMs) return;
+      stderr = `${stderr}\n[HealthState] 后端已输出结果但未退出，已结束同步后处理等待。`.trim();
+      stopChild();
+      finish({ ok: true, code: 0, stdout, stderr, postprocessTerminated: true });
+    }, 1000);
+
+    child.stdout.on("data", (chunk) => {
+      const text = chunk.toString("utf8");
+      stdout += text;
+      lastStdoutAt = Date.now();
+      consumeStreamChunk(text);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("error", (error) => {
+      finish({
+        ok: false,
+        code: 1,
+        stdout,
+        stderr: `${stderr}\n${error.message}`.trim()
+      });
+    });
+    child.on("close", (code) => {
+      flushStreamBuffer();
+      finish({
+        ok: code === 0,
+        code,
+        stdout,
+        stderr
+      });
+    });
+  });
+}
+
+function runStatus() {
+  return new Promise((resolve) => {
+    const settings = readSettings();
+    const workspace = String(settings.workspace || defaultWorkspace());
+    const py = pythonCommand();
+    if (py.missing) {
+      resolve({ ok: false, code: 1, stdout: "", stderr: py.message || "Python 运行时不可用。" });
+      return;
+    }
+    const args = pythonScriptArgs(py, RUN_AGENT, [
+      "--status",
+      "--workspace",
+      workspace,
+      "--max-steps",
+      String(settings.maxSteps || 20),
+      ...modelArgsFromSettings(settings)
+    ]);
+    const child = spawn(py.command, args, {
+      cwd: ROOT,
+      env: backendPythonEnv(py, {
+        ...modelEnvFromSettings(settings),
+        TIANGONG_SESSION_SCOPE: sessionScope(settings, workspace)
+      }),
+      windowsHide: true
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("error", (error) => resolve({ ok: false, stdout, stderr: error.message }));
+    child.on("close", (code) => resolve({ ok: code === 0, code, stdout, stderr }));
+  });
+}
+
+function runConfig() {
+  return new Promise((resolve) => {
+    const settings = readSettings();
+    const workspace = String(settings.workspace || defaultWorkspace());
+    const py = pythonCommand();
+    if (py.missing) {
+      resolve({ ok: false, code: 1, stdout: "", stderr: py.message || "Python 运行时不可用。" });
+      return;
+    }
+    const args = pythonScriptArgs(py, RUN_AGENT, [
+      "--show-config",
+      "--workspace",
+      workspace,
+      "--max-steps",
+      String(settings.maxSteps || 20),
+      ...modelArgsFromSettings(settings)
+    ]);
+    const child = spawn(py.command, args, {
+      cwd: ROOT,
+      env: backendPythonEnv(py, {
+        ...modelEnvFromSettings(settings),
+        TIANGONG_SESSION_SCOPE: sessionScope(settings, workspace)
+      }),
+      windowsHide: true
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("error", (error) => resolve({ ok: false, stdout, stderr: error.message }));
+    child.on("close", (code) => resolve({ ok: code === 0, code, stdout, stderr }));
+  });
+}
+
+function parseBridgeJson(stdout, fallback = {}) {
+  try {
+    return JSON.parse(String(stdout || "").trim() || "{}");
+  } catch {
+    return { ok: false, error: "桌面桥接输出无法解析", stdout, ...fallback };
+  }
+}
+
+function runLifecycleDecision(action, payload = {}) {
+  return new Promise((resolve) => {
+    if (!fs.existsSync(RUN_AGENT)) {
+      resolve({ ok: false, error: "找不到后端运行代理" });
+      return;
+    }
+    const settings = readSettings();
+    const workspace = String(payload.workspace || settings.workspace || defaultWorkspace());
+    const updateId = String(payload.id || payload.ticketId || payload.updateId || "").trim();
+    if (!updateId) {
+      resolve({ ok: false, error: "缺少待确认自主更新编号" });
+      return;
+    }
+    const py = pythonCommand();
+    if (py.missing) {
+      resolve({ ok: false, error: py.message || "Python 运行时不可用。" });
+      return;
+    }
+    const flag = action === "deny" ? "--lifecycle-deny" : "--lifecycle-confirm";
+    const args = pythonScriptArgs(py, RUN_AGENT, [
+      flag,
+      updateId,
+      "--workspace",
+      workspace,
+      "--max-steps",
+      String(settings.maxSteps || 20),
+      ...modelArgsFromSettings(settings)
+    ]);
+    const child = spawn(py.command, args, {
+      cwd: ROOT,
+      env: backendPythonEnv(py, {
+        ...modelEnvFromSettings(settings),
+        TIANGONG_SESSION_SCOPE: sessionScope(settings, workspace)
+      }),
+      windowsHide: true
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("error", (error) => resolve({ ok: false, error: error.message, stderr }));
+    child.on("close", (code) => {
+      const parsed = parseBridgeJson(stdout, { code, stderr });
+      resolve({ ...parsed, ok: Boolean(parsed.ok) && code === 0, code, stderr });
+    });
+  });
+}
+
+function runKnowledgeBridge(action, payload = {}) {
+  return new Promise((resolve) => {
+    if (!fs.existsSync(KNOWLEDGE_BRIDGE)) {
+      resolve({ ok: false, error: "找不到知识库桥接脚本" });
+      return;
+    }
+    const settings = readSettings();
+    const workspace = String(payload.workspace || settings.workspace || defaultWorkspace());
+    const py = pythonCommand();
+    if (py.missing) {
+      resolve({ ok: false, error: py.message || "Python 运行时不可用。" });
+      return;
+    }
+    const args = pythonScriptArgs(py, KNOWLEDGE_BRIDGE, [
+      "--action",
+      String(action || "list"),
+      "--workspace",
+      workspace
+    ]);
+    const child = spawn(py.command, args, {
+      cwd: ROOT,
+      env: backendPythonEnv(py),
+      windowsHide: true
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("error", (error) => resolve({ ok: false, error: error.message, stderr }));
+    child.on("close", (code) => {
+      const parsed = parseBridgeJson(stdout, { code, stderr });
+      resolve({ ...parsed, ok: Boolean(parsed.ok) && code === 0, code, stderr });
+    });
+    child.stdin.end(JSON.stringify({ ...payload, workspace }));
+  });
+}
+
+async function chooseKnowledgeFiles(payload = {}) {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "选择知识库文件",
+    defaultPath: payload.workspace || readSettings().workspace || defaultWorkspace(),
+    properties: ["openFile", "multiSelections"],
+    filters: [
+      { name: "文档", extensions: ["txt", "md", "markdown", "csv", "json", "jsonl", "html", "htm", "xml", "yaml", "yml", "docx", "xlsx", "pptx", "pdf"] },
+      { name: "全部文件", extensions: ["*"] }
+    ]
+  });
+  if (result.canceled || !result.filePaths.length) {
+    return runKnowledgeBridge("list", payload);
+  }
+  return runKnowledgeBridge("import", { ...payload, paths: result.filePaths });
+}
+
+function createWindow() {
+  mainWindow = new BrowserWindow({
+    width: 1380,
+    height: 840,
+    minWidth: 1040,
+    minHeight: 680,
+    title: "天工造物 - 临渊者",
+    icon: APP_ICON,
+    autoHideMenuBar: true,
+    backgroundColor: "#0C0E11",
+    darkTheme: true,
+    webPreferences: {
+      preload: PRELOAD,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false
+    }
+  });
+  mainWindow.on("closed", () => {
+    mainWindow = null;
+  });
+  mainWindow.webContents.on("did-finish-load", () => writeDebugLog("did-finish-load", INDEX));
+  mainWindow.webContents.on("did-fail-load", (_event, code, desc, url) => writeDebugLog("did-fail-load", `${code} ${desc} ${url || ""}`));
+  mainWindow.webContents.on("render-process-gone", (_event, details) => writeDebugLog("render-process-gone", JSON.stringify(details)));
+  mainWindow.webContents.on("preload-error", (_event, preloadPath, error) => writeDebugLog("preload-error", `${preloadPath}: ${error.stack || error.message}`));
+  mainWindow.webContents.on("console-message", (_event, levelOrDetails, message, line, sourceId) => {
+    if (typeof levelOrDetails === "object" && levelOrDetails !== null) {
+      writeDebugLog("console-message", JSON.stringify(levelOrDetails));
+      return;
+    }
+    writeDebugLog("console-message", `${levelOrDetails} ${message || ""} ${sourceId || ""}:${line || ""}`);
+  });
+  mainWindow.setMenuBarVisibility(false);
+  mainWindow.loadFile(INDEX);
+}
+
+app.whenReady().then(() => {
+  Menu.setApplicationMenu(null);
+  ipcMain.handle("runtime:getSettings", () => readSettings());
+  ipcMain.handle("runtime:setSettings", (_event, next) => writeSettings(next || {}));
+  ipcMain.handle("runtime:chooseWorkspace", async () => {
+    const current = readSettings();
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: "选择工作区",
+      defaultPath: current.workspace || defaultWorkspace(),
+      properties: ["openDirectory", "createDirectory"]
+    });
+    if (result.canceled || !result.filePaths[0]) return current;
+    return writeSettings({ workspace: result.filePaths[0] });
+  });
+  ipcMain.handle("runtime:choosePersonaAvatar", () => choosePersonaAvatar());
+  ipcMain.handle("runtime:send", (_event, payload) => runBackend(payload.message, payload));
+  ipcMain.handle("runtime:status", () => runStatus());
+  ipcMain.handle("runtime:config", () => runConfig());
+  ipcMain.handle("lifecycle:confirm", (_event, payload) => runLifecycleDecision("confirm", payload || {}));
+  ipcMain.handle("lifecycle:deny", (_event, payload) => runLifecycleDecision("deny", payload || {}));
+  ipcMain.handle("knowledge:list", (_event, payload) => runKnowledgeBridge("list", payload || {}));
+  ipcMain.handle("knowledge:chooseFiles", (_event, payload) => chooseKnowledgeFiles(payload || {}));
+  ipcMain.handle("knowledge:query", (_event, payload) => runKnowledgeBridge("query", payload || {}));
+  ipcMain.handle("knowledge:export", (_event, payload) => runKnowledgeBridge("export", payload || {}));
+  ipcMain.handle("knowledge:remove", (_event, payload) => runKnowledgeBridge("remove", payload || {}));
+  ipcMain.handle("runtime:openPath", async (_event, targetPath) => {
+    const code = await shell.openPath(String(targetPath || ROOT));
+    return { ok: !code, code };
+  });
+  createWindow();
+}).catch((error) => console.error(error));
+
+app.on("activate", () => {
+  if (BrowserWindow.getAllWindows().length === 0) createWindow();
+});
+
+app.on("window-all-closed", () => {
+  if (process.platform !== "darwin") app.quit();
+});

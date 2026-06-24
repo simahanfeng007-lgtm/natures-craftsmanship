@@ -1,0 +1,41 @@
+[
+  {
+    "case_id": "image_schema_declared",
+    "tool": "image_inspect",
+    "args": {
+      "image_path": "sample.png"
+    }
+  },
+  {
+    "case_id": "video_schema_declared",
+    "tool": "video_keyframe_extract",
+    "args": {
+      "video_path": "sample.mp4",
+      "interval_sec": 5
+    }
+  },
+  {
+    "case_id": "image_generate_request",
+    "tool": "image_generate",
+    "args": {
+      "prompt": "国风海报",
+      "size": "1024x1024"
+    }
+  },
+  {
+    "case_id": "video_trim_contract",
+    "tool": "video_trim",
+    "args": {
+      "video_path": "sample.mp4",
+      "start_sec": 0,
+      "end_sec": 5
+    }
+  },
+  {
+    "case_id": "audio_transcribe_contract",
+    "tool": "audio_transcribe",
+    "args": {
+      "audio_path": "sample.wav"
+    }
+  }
+]

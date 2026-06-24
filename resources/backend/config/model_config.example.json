@@ -1,0 +1,16 @@
+{
+  "provider": "openai_compatible",
+  "base_url": "",
+  "api_key": "",
+  "model": "deepseek-v4-pro",
+  "max_tokens": 0,
+  "multimodal_input": null,
+  "image_input": null,
+  "video_input": null,
+  "audio_input": null,
+  "thinking_enabled": false,
+  "thinking_depth": "",
+  "tool_execution_mode": "disabled",
+  "planner_mode": "rule_only",
+  "note": "Provider credential fields are write-only. Do not store real secrets in this file for distribution."
+}

@@ -1,0 +1,17 @@
+*.exe
+*.dll
+*.pak
+*.bin
+*.dat
+node_modules/
+__pycache__/
+*.pyc
+*.bak-*
+.old
+*.old/
+installer/
+*.zip
+*.7z
+*.tar.gz
+.DS_Store
+Thumbs.db
